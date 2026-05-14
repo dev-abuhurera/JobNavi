@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { CheckCircle, XCircle, ExternalLink, Briefcase, Sparkles, Building2, MapPin, Globe } from 'lucide-react'
+import { CheckCircle, XCircle, ExternalLink, Briefcase, Sparkles, Building2, MapPin, Globe, Trash2 } from 'lucide-react'
 
 export default function ApprovalsPage() {
   const [jobs, setJobs] = useState<any[]>([])
@@ -55,6 +55,21 @@ export default function ApprovalsPage() {
     }
   }
 
+  const handleDelete = async (id: string | number) => {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+
+    const { error } = await supabase
+      .from('jobs')
+      .delete()
+      .eq('id', id)
+      .eq('user_id', user.id)
+
+    if (!error) {
+      setJobs(prev => prev.filter(j => j.id !== id))
+    }
+  }
+
   return (
     <div className="animate-in fade-in duration-700">
       <header className="mb-8">
@@ -83,8 +98,16 @@ export default function ApprovalsPage() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {jobs.map((job) => (
-            <div key={job.id} className="bg-white dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-3xl p-8 shadow-sm hover:shadow-md transition-all flex flex-col">
-              <div className="flex items-start justify-between mb-6">
+            <div key={job.id} className="bg-white dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-3xl p-8 shadow-sm hover:shadow-md transition-all flex flex-col group relative">
+              <button 
+                onClick={() => handleDelete(job.id)}
+                className="absolute top-6 right-6 p-2 text-slate-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                title="Permanently Delete"
+              >
+                <Trash2 size={18} />
+              </button>
+
+              <div className="flex items-start justify-between mb-6 pr-8">
                 <div>
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-[10px] font-bold text-blue-500 uppercase tracking-widest bg-blue-500/10 px-2 py-0.5 rounded">
