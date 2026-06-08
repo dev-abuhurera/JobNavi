@@ -227,7 +227,7 @@ MAX_APPLICATIONS=100
 
 ---
 
-##Architecture
+## Architecture
 ```
 Three-Layer Design
 Layer 1: Field Extraction
@@ -273,7 +273,7 @@ for (const action of actions) {
 ```
 ---
 
-##Why This Works
+## Why This Works
 ```
 Problem: Raw HTML → AI guesses → Fails
 
@@ -321,7 +321,7 @@ And 40+ more...
 ```
 ---
 
-##API Reference
+## API Reference
 ```
 
 Core Classes
@@ -367,7 +367,7 @@ Review form verification requirements
 ```
 ---
 
-##API Rate Limits
+## API Rate Limits
 ```
 Free Groq tier: 30 requests/minute
 
@@ -402,9 +402,9 @@ Create mobile app
 ```
 ---
 
-##Roadmap
+## Roadmap
 
-##Phase 1 (Current)
+## Phase 1 (Current)
 ```
 
 ✅ Core form filling
@@ -416,7 +416,7 @@ Create mobile app
 ```
 ---
 
-##Phase 2 (Q2 2024)
+## Phase 2 (Q2 2024)
 ```
 Resume optimization AI
 
@@ -429,7 +429,7 @@ Interview prep integration
 ```
 ---
 
-##Phase 3 (Q3 2024)
+## Phase 3 (Q3 2024)
 ```
 Mobile application
 
@@ -442,7 +442,7 @@ Company research tools
 ```
 ---
 
-##Phase 4 (Q4 2024)
+## Phase 4 (Q4 2024)
 ```
 AI interview practice
 
@@ -455,7 +455,7 @@ Analytics dashboard
 ```
 ---
 
-##Limitations
+## Limitations
 ```
 CAPTCHA: Manual intervention required
 
@@ -488,5 +488,5 @@ Use this to enhance your search, not deceive employers
 
 ```
 ---
-##License
+## License
 MIT License - see LICENSE file for details
