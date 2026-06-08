@@ -149,7 +149,7 @@ text
 
 ### Quick Start
 
-```bash
+```
 # Clone the repository
 git clone https://github.com/yourusername/jobnavi.git
 cd jobnavi
@@ -196,6 +196,11 @@ jobnavi history
 
 # Export statistics
 jobnavi export --format csv
+
+```
+---
+
+```
 Configuration
 Create .env file:
 
@@ -217,6 +222,12 @@ HEADLESS_MODE=true
 SUBMIT_ENABLED=true
 DUPLICATE_CHECK=true
 MAX_APPLICATIONS=100
+
+```
+
+---
+
+```
 Architecture
 Three-Layer Design
 Layer 1: Field Extraction
@@ -258,6 +269,11 @@ for (const action of actions) {
       await element.check() // Not .fill()!
   }
 }
+
+```
+---
+
+```
 Why This Works
 Problem: Raw HTML → AI guesses → Fails
 
@@ -302,6 +318,11 @@ Jobalign
 
 And 40+ more...
 
+```
+---
+
+```
+
 API Reference
 Core Classes
 FormFieldExtractor
@@ -343,6 +364,10 @@ Ensure you're logged into the job board
 
 Review form verification requirements
 
+```
+---
+
+```
 API Rate Limits
 Free Groq tier: 30 requests/minute
 
@@ -374,14 +399,23 @@ Build resume optimization engine
 
 Create mobile app
 
+```
+---
+
+```
 Roadmap
 Phase 1 (Current)
+
 ✅ Core form filling
 
 ✅ Multi-platform support
 
 ✅ Application tracking
 
+```
+---
+
+```
 Phase 2 (Q2 2024)
 Resume optimization AI
 
@@ -391,6 +425,10 @@ Follow-up email templates
 
 Interview prep integration
 
+```
+---
+
+```
 Phase 3 (Q3 2024)
 Mobile application
 
@@ -400,6 +438,10 @@ Salary data integration
 
 Company research tools
 
+```
+---
+
+```
 Phase 4 (Q4 2024)
 AI interview practice
 
@@ -409,6 +451,10 @@ Referral program integration
 
 Analytics dashboard
 
+```
+---
+
+```
 Limitations
 CAPTCHA: Manual intervention required
 
@@ -438,6 +484,9 @@ Don't submit false information
 Respect application deadlines and requirements
 
 Use this to enhance your search, not deceive employers
+
+```
+---
 
 License
 MIT License - see LICENSE file for details
