@@ -64,6 +64,7 @@ JobNavi is an intelligent automation platform that fills out job application for
 ## How It Works
 
 ### 1. Form Detection
+
 User uploads job listing URL
 ↓
 JobNavi opens form in browser
@@ -75,6 +76,7 @@ Verifies all selectors exist
 text
 
 ### 2. Intelligent Planning
+
 Structured form data
 ↓
 AI analyzes field requirements
@@ -86,6 +88,7 @@ Plans filling actions (no hallucination)
 text
 
 ### 3. Precise Execution
+
 For each field:
 
 TEXT → .fill()
@@ -101,6 +104,7 @@ FILE → .setInputFiles()
 text
 
 ### 4. Verification & Submission
+
 Verify all fields filled correctly
 ↓
 Check for CAPTCHA/verification
@@ -198,6 +202,7 @@ jobnavi history
 jobnavi export --format csv
 
 ```
+
 ---
 
 ```
@@ -228,6 +233,7 @@ MAX_APPLICATIONS=100
 ---
 
 ## Architecture
+
 ```
 Three-Layer Design
 Layer 1: Field Extraction
@@ -271,9 +277,11 @@ for (const action of actions) {
 }
 
 ```
+
 ---
 
 ## Why This Works
+
 ```
 Problem: Raw HTML → AI guesses → Fails
 
@@ -319,9 +327,11 @@ Jobalign
 And 40+ more...
 
 ```
+
 ---
 
 ## API Reference
+
 ```
 
 Core Classes
@@ -365,9 +375,11 @@ Ensure you're logged into the job board
 Review form verification requirements
 
 ```
+
 ---
 
 ## API Rate Limits
+
 ```
 Free Groq tier: 30 requests/minute
 
@@ -400,11 +412,13 @@ Build resume optimization engine
 Create mobile app
 
 ```
+
 ---
 
 ## Roadmap
 
 ## Phase 1 (Current)
+
 ```
 
 ✅ Core form filling
@@ -414,9 +428,11 @@ Create mobile app
 ✅ Application tracking
 
 ```
+
 ---
 
 ## Phase 2 (Q2 2024)
+
 ```
 Resume optimization AI
 
@@ -427,9 +443,11 @@ Follow-up email templates
 Interview prep integration
 
 ```
+
 ---
 
 ## Phase 3 (Q3 2024)
+
 ```
 Mobile application
 
@@ -440,9 +458,11 @@ Salary data integration
 Company research tools
 
 ```
+
 ---
 
 ## Phase 4 (Q4 2024)
+
 ```
 AI interview practice
 
@@ -453,9 +473,11 @@ Referral program integration
 Analytics dashboard
 
 ```
+
 ---
 
 ## Limitations
+
 ```
 CAPTCHA: Manual intervention required
 
@@ -487,6 +509,9 @@ Respect application deadlines and requirements
 Use this to enhance your search, not deceive employers
 
 ```
+
 ---
+
 ## License
+
 MIT License - see LICENSE file for details
