@@ -1,139 +1,167 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Target, ExternalLink, Trash2, Search, Filter } from 'lucide-react'
+import { Target, ExternalLink, Trash2, Search, CheckCircle2, Calendar, Sparkles, Building2 } from 'lucide-react'
 
 export default function ApplicationsPage() {
   const [apps, setApps] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
-  const [searchTerm, setSearchTerm] = useState('')
+  const [q, setQ] = useState('')
   const supabase = createClient()
 
-  useEffect(() => {
-    fetchApplications()
-  }, [])
-
-  const fetchApplications = async () => {
+  const fetchApps = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-    
-    const { data } = await supabase
-      .from('applications')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-    
+    const { data } = await supabase.from('applications').select('*').eq('user_id', user.id).order('created_at', { ascending: false })
     if (data) setApps(data)
     setLoading(false)
-  }
+  }, [supabase])
+
+  useEffect(() => { fetchApps() }, [fetchApps])
 
   const handleDelete = async (id: number) => {
-    const { error } = await supabase.from('applications').delete().eq('id', id)
-    if (!error) {
-      setApps(apps.filter(a => a.id !== id))
-    }
+    if (!window.confirm('Delete this application record?')) return
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    const { error } = await supabase.from('applications').delete().eq('id', id).eq('user_id', user.id)
+    if (!error) setApps(apps.filter(a => a.id !== id))
   }
 
-  const filteredApps = apps.filter(app => 
-    app.company.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    app.job_title.toLowerCase().includes(searchTerm.toLowerCase())
+  const filtered = apps.filter(a =>
+    (a.company || '').toLowerCase().includes(q.toLowerCase()) ||
+    (a.job_title || '').toLowerCase().includes(q.toLowerCase())
   )
 
   return (
-    <div className="animate-in fade-in duration-700">
-      <header className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-slate-900 dark:text-white tracking-tight">Applications</h1>
-          <p className="text-slate-500 dark:text-slate-400">Track and manage your automated outreach pipeline.</p>
-        </div>
-        
+    <div className="space-y-6">
+      {/* Fancy Glass Header */}
+      <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div className="flex items-center gap-3">
-          <div className="relative">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-            <input 
-              className="bg-white dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-xl pl-11 pr-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 dark:text-white"
-              placeholder="Search company..."
-              value={searchTerm}
-              onChange={e => setSearchTerm(e.target.value)}
-            />
+          <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shadow-lg shadow-emerald-500/20 shrink-0">
+            <Target size={22} />
           </div>
-          <button className="p-2.5 bg-white dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-xl text-slate-500 hover:text-blue-500 transition-colors">
-            <Filter size={18} />
-          </button>
+          <div>
+            <div className="flex items-center gap-2.5">
+              <h1 className="font-display text-3xl font-bold tracking-tight text-slate-900">Applications</h1>
+              <span className="font-mono text-xs font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 border border-emerald-200">
+                {filtered.length} Submissions
+              </span>
+            </div>
+            <p className="text-slate-500 text-sm mt-0.5">Track and manage your automated job application pipeline.</p>
+          </div>
+        </div>
+
+        {/* Translucent Glass Search Input */}
+        <div className="relative w-full sm:w-72">
+          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
+          <input
+            className="w-full bg-white/80 border border-slate-200/80 rounded-2xl pl-11 pr-4 py-2.5 text-sm font-semibold text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 transition-all shadow-2xs"
+            placeholder="Search company or position..."
+            value={q}
+            onChange={e => setQ(e.target.value)}
+          />
         </div>
       </header>
 
-      <div className="bg-white dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-3xl overflow-hidden shadow-sm">
+      {/* Main Glass Table Box */}
+      <div className="bg-white/70 backdrop-blur-3xl border border-white/90 rounded-3xl overflow-hidden shadow-[0_20px_50px_rgba(0,0,0,0.04)]">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead>
-              <tr className="text-slate-400 border-b border-slate-50 dark:border-white/5">
-                <th className="px-8 py-5 font-semibold uppercase text-[10px] tracking-wider">Target Company</th>
-                <th className="px-8 py-5 font-semibold uppercase text-[10px] tracking-wider">Position</th>
-                <th className="px-8 py-5 font-semibold uppercase text-[10px] tracking-wider">Fit Score</th>
-                <th className="px-8 py-5 font-semibold uppercase text-[10px] tracking-wider">Status</th>
-                <th className="px-8 py-5 font-semibold uppercase text-[10px] tracking-wider">Date Sent</th>
-                <th className="px-8 py-5 font-semibold uppercase text-[10px] tracking-wider">Actions</th>
+              <tr className="text-slate-400 border-b border-slate-200/60 bg-slate-50/50 select-none">
+                <th className="px-6 py-3.5 font-mono font-bold uppercase text-[10px] tracking-wider">Company</th>
+                <th className="px-6 py-3.5 font-mono font-bold uppercase text-[10px] tracking-wider">Position</th>
+                <th className="px-6 py-3.5 font-mono font-bold uppercase text-[10px] tracking-wider">AI Fit Score</th>
+                <th className="px-6 py-3.5 font-mono font-bold uppercase text-[10px] tracking-wider">Status</th>
+                <th className="px-6 py-3.5 font-mono font-bold uppercase text-[10px] tracking-wider">Applied Date</th>
+                <th className="px-6 py-3.5 font-mono font-bold uppercase text-[10px] tracking-wider text-right">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-50 dark:divide-white/5">
+            <tbody className="divide-y divide-slate-100">
               {loading ? (
                 Array(5).fill(0).map((_, i) => (
-                  <tr key={i} className="animate-pulse">
-                    <td colSpan={6} className="px-8 py-5">
-                      <div className="h-4 bg-slate-100 dark:bg-white/5 rounded w-full"></div>
+                  <tr key={i}>
+                    <td colSpan={6} className="px-6 py-4">
+                      <div className="h-5 bg-slate-100 rounded-xl animate-pulse" />
                     </td>
                   </tr>
                 ))
-              ) : filteredApps.length === 0 ? (
+              ) : filtered.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="px-8 py-20 text-center">
-                    <div className="flex flex-col items-center gap-3">
-                      <Target size={40} className="text-slate-200" />
-                      <p className="text-slate-500 text-sm">No applications found.</p>
+                  <td colSpan={6} className="px-6 py-16 text-center">
+                    <div className="w-12 h-12 rounded-2xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-3 shadow-2xs">
+                      <Target size={24} />
                     </div>
+                    <p className="text-slate-700 font-bold text-sm">No applications found.</p>
+                    <p className="text-slate-400 text-xs mt-1">Start a discovery search to begin auto-applying.</p>
                   </td>
                 </tr>
               ) : (
-                filteredApps.map((app) => (
-                  <tr key={app.id} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors group">
-                    <td className="px-8 py-5">
-                      <div className="font-bold text-slate-900 dark:text-white">{app.company}</div>
-                      <div className="text-[10px] text-slate-400 uppercase tracking-tighter mt-0.5">{app.portal || 'Direct'}</div>
-                    </td>
-                    <td className="px-8 py-5 text-slate-600 dark:text-slate-400 font-medium">{app.job_title}</td>
-                    <td className="px-8 py-5">
-                      <div className="flex items-center gap-3">
-                        <div className="flex-1 min-w-[60px] h-1.5 bg-slate-100 dark:bg-white/10 rounded-full overflow-hidden">
-                          <div className="bg-blue-500 h-full" style={{ width: `${app.fit_score}%` }}></div>
+                filtered.map(app => (
+                  <tr key={app.id} className="group hover:bg-white/90 transition-colors">
+                    
+                    {/* Company */}
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-8 h-8 rounded-xl bg-slate-100 border border-slate-200/60 flex items-center justify-center text-slate-700 font-bold shrink-0">
+                          <Building2 size={16} />
                         </div>
-                        <span className="text-xs font-bold text-blue-500">{app.fit_score}%</span>
+                        <span className="font-bold text-slate-900 text-sm">{app.company}</span>
                       </div>
                     </td>
-                    <td className="px-8 py-5">
-                      <span className="px-3 py-1 rounded-full bg-blue-500/10 text-blue-500 text-[10px] font-bold uppercase tracking-widest">
-                        {app.current_status}
+
+                    {/* Job Title */}
+                    <td className="px-6 py-4 text-slate-700 font-semibold text-xs">{app.job_title}</td>
+
+                    {/* Fit Score */}
+                    <td className="px-6 py-4">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-16 h-2 bg-slate-100 rounded-full overflow-hidden border border-slate-200/50">
+                          <div
+                            className="bg-emerald-500 h-full rounded-full transition-all"
+                            style={{ width: `${app.fit_score || 0}%` }}
+                          />
+                        </div>
+                        <span className="font-mono text-xs font-bold text-emerald-700">{app.fit_score || 0}%</span>
+                      </div>
+                    </td>
+
+                    {/* Status */}
+                    <td className="px-6 py-4">
+                      <span className="inline-flex items-center gap-1 font-mono px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-700 border border-emerald-200 text-[10px] font-bold uppercase tracking-wider">
+                        <CheckCircle2 size={12} /> {app.current_status}
                       </span>
                     </td>
-                    <td className="px-8 py-5 text-slate-500">
-                      {new Date(app.created_at).toLocaleDateString()}
+
+                    {/* Date */}
+                    <td className="px-6 py-4 text-xs font-medium text-slate-500">
+                      <div className="flex items-center gap-1.5">
+                        <Calendar size={13} className="text-slate-400" />
+                        {new Date(app.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                      </div>
                     </td>
-                    <td className="px-8 py-5">
-                      <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <a 
-                          href={app.source_url} 
-                          target="_blank" 
-                          rel="noreferrer"
-                          className="p-2 bg-slate-100 dark:bg-white/10 rounded-lg text-slate-500 hover:text-blue-500 transition-colors"
-                        >
-                          <ExternalLink size={14} />
-                        </a>
-                        <button 
+
+                    {/* Actions */}
+                    <td className="px-6 py-4 text-right">
+                      <div className="flex items-center justify-end gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
+                        {app.source_url && (
+                          <a
+                            href={app.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            title="View Job Listing"
+                            className="p-2 rounded-xl text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition-all"
+                          >
+                            <ExternalLink size={15} />
+                          </a>
+                        )}
+                        <button
                           onClick={() => handleDelete(app.id)}
-                          className="p-2 bg-slate-100 dark:bg-white/10 rounded-lg text-slate-500 hover:text-red-500 transition-colors"
+                          title="Delete Record"
+                          className="p-2 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-all"
                         >
-                          <Trash2 size={14} />
+                          <Trash2 size={15} />
                         </button>
                       </div>
                     </td>

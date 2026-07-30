@@ -1,114 +1,236 @@
 import { createClient } from '@/lib/supabase/server'
 import { getJobs, getApplications } from '@/lib/supabase/db'
-import { Activity, LayoutDashboard, Search, Target, CheckCircle, ArrowRight } from 'lucide-react'
+import { ArrowRight, Send, Briefcase, CheckCircle2, Target, Layers, Compass, Building2 } from 'lucide-react'
 
 export default async function DashboardPage() {
   const supabase = createClient()
   const { data: { user } } = await supabase.auth.getUser()
-  
   if (!user) return null
 
-  const jobs = await getJobs(user.id)
-  const apps = await getApplications(user.id)
-  
-  // Count jobs with status 'discovered' for approvals
+  const [jobs, apps] = await Promise.all([
+    getJobs(user.id),
+    getApplications(user.id),
+  ])
+
   const awaitingApproval = jobs.filter(j => j.status === 'discovered').length
+  const appliedCount = apps.filter(a => a.current_status === 'applied').length
+  const scored = apps.filter(a => typeof a.fit_score === 'number')
+  const avgMatch = scored.length ? Math.round(scored.reduce((s, a) => s + a.fit_score, 0) / scored.length) : 0
 
   const stats = [
-    { label: 'Applications sent', value: apps.length, trend: '+2 this week' },
-    { label: 'Active Interviews', value: 0, trend: '+1 this week' },
-    { label: 'Awaiting Approval', value: awaitingApproval, trend: awaitingApproval > 0 ? 'Action required' : 'System is ready', color: awaitingApproval > 0 ? 'text-amber-500' : '' },
-    { label: 'Average Match', value: '78%', trend: '+2% vs benchmark' },
+    {
+      label: 'Applications Sent',
+      value: appliedCount,
+      sub: `${apps.length} Submissions`,
+      icon: <Send size={16} className="text-white" />,
+    },
+    {
+      label: 'Jobs Discovered',
+      value: jobs.length,
+      sub: 'In Discovery Pipeline',
+      icon: <Briefcase size={16} className="text-white" />,
+    },
+    {
+      label: 'Awaiting Approval',
+      value: awaitingApproval,
+      sub: awaitingApproval > 0 ? 'Pending Review' : 'All Jobs Reviewed',
+      icon: <CheckCircle2 size={16} className="text-white" />,
+    },
+    {
+      label: 'Average Match Score',
+      value: scored.length ? `${avgMatch}%` : 'N/A',
+      sub: `${scored.length} Scored by AI`,
+      icon: <Target size={16} className="text-white" />,
+    },
   ]
 
   return (
-    <div className="animate-in fade-in duration-700">
-      <header className="flex items-center justify-between mb-8">
+    <div className="space-y-6">
+      {/* Sleek Glass Header */}
+      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
-          <h1 className="text-3xl font-bold text-slate-900 dark:text-white tracking-tight">Overview</h1>
-          <p className="text-slate-500 dark:text-slate-400">Welcome back to your job search mission.</p>
+          <div className="flex items-center gap-2.5">
+            <h1 className="font-display text-2xl font-bold tracking-tight text-slate-900">Overview</h1>
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/10 text-emerald-700 border border-emerald-200 backdrop-blur-md">
+              <span className="relative flex h-1.5 w-1.5">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+              </span>
+              Live
+            </span>
+          </div>
+          <p className="text-slate-500 text-xs mt-0.5">Live overview of your job discovery and application pipeline.</p>
         </div>
+
+        <a
+          href="/dashboard/discovery"
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-sm shadow-emerald-600/20 transition-all active:scale-95 w-fit"
+        >
+          <Compass size={15} /> Start Discovery Search
+        </a>
       </header>
 
-      {/* Real-time Status Banner */}
-      <div className="bg-blue-500/5 border border-blue-500/10 rounded-2xl p-4 flex items-center gap-4 mb-8">
-        <div className="animate-spin text-blue-500">
-          <Activity size={14} />
-        </div>
-        <div className="text-[11px] font-bold text-blue-500 uppercase tracking-widest">Current Status:</div>
-        <div className="text-sm text-slate-600 dark:text-slate-300 truncate">Agent is standby. Ready for discovery session.</div>
-      </div>
+      {/* 4 Compact Telemetry Stat Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        {stats.map((s, i) => (
+          <div
+            key={i}
+            className="group bg-white/80 backdrop-blur-2xl border border-slate-200/80 rounded-2xl p-4 shadow-2xs hover:shadow-xs transition-all duration-200 flex flex-col justify-between space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">{s.label}</span>
+              <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-600 to-teal-500 text-white flex items-center justify-center shadow-xs">
+                {s.icon}
+              </div>
+            </div>
 
-      {/* Stats Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        {stats.map((stat, i) => (
-          <div key={i} className="bg-white dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-2xl p-6 shadow-sm">
-            <div className="text-sm font-medium text-slate-500 dark:text-slate-400 mb-2">{stat.label}</div>
-            <div className={`text-4xl font-bold dark:text-white mb-2 ${stat.color || ''}`}>{stat.value}</div>
-            <div className="text-[11px] font-bold text-slate-400 uppercase tracking-tighter">{stat.trend}</div>
+            <div>
+              <div className="font-display text-2xl font-bold tracking-tight text-slate-900">
+                {s.value}
+              </div>
+              <div className="mt-1.5 inline-flex items-center font-mono text-[9px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-700 border border-emerald-200/70">
+                {s.sub}
+              </div>
+            </div>
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        {/* Action Required */}
-        <div className="bg-white dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-3xl overflow-hidden shadow-sm">
-          <div className="px-6 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
-            <h3 className="font-bold text-slate-900 dark:text-white flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse"></span>
-              Action Required
-            </h3>
-            <button className="text-[11px] font-bold text-blue-500 uppercase tracking-widest hover:underline flex items-center gap-1">
-              Open Approvals <ArrowRight size={12} />
-            </button>
+      {/* 2-Column Main Section */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        
+        {/* Left Column: Action Required Glass Card */}
+        <div className="bg-white/80 backdrop-blur-2xl border border-slate-200/80 rounded-2xl p-5 shadow-2xs flex flex-col justify-between space-y-4">
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                <h3 className="font-display font-bold text-base text-slate-900">Action Required</h3>
+              </div>
+              
+              <a
+                href="/dashboard/approvals"
+                className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 hover:text-slate-950 bg-slate-100 hover:bg-slate-200 border border-slate-200/80 px-2.5 py-1 rounded-xl transition-all"
+              >
+                Open Approvals <ArrowRight size={13} />
+              </a>
+            </div>
+
+            <p className="text-xs text-slate-500 font-medium">
+              Approve jobs for your agent to apply.
+            </p>
           </div>
-          <div className="p-12 text-center">
-            <p className="text-sm text-slate-500">Agent is waiting for more job discoveries.</p>
+
+          <div className="bg-emerald-500/5 border border-emerald-200/80 rounded-xl p-4 text-center space-y-3">
+            {awaitingApproval > 0 ? (
+              <>
+                <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center mx-auto shadow-2xs border border-emerald-200/80">
+                  <CheckCircle2 size={20} />
+                </div>
+                <div>
+                  <div className="text-base font-bold text-slate-900">{awaitingApproval} Job(s) Pending Review</div>
+                  <p className="text-xs text-slate-500 mt-0.5">Review applicant profiles and match scores.</p>
+                </div>
+                <a
+                  href="/dashboard/approvals"
+                  className="inline-flex items-center justify-center w-full py-2.5 px-3 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 transition-all shadow-sm shadow-emerald-600/20 active:scale-95"
+                >
+                  Review Jobs Now
+                </a>
+              </>
+            ) : (
+              <>
+                <div className="w-9 h-9 rounded-xl bg-emerald-500/10 text-emerald-600 flex items-center justify-center mx-auto shadow-2xs border border-emerald-200/80">
+                  <CheckCircle2 size={20} />
+                </div>
+                <div>
+                  <div className="text-sm font-bold text-slate-900">All Discovered Jobs Reviewed</div>
+                  <p className="text-xs text-slate-500 mt-0.5">Your discovery pipeline is 100% up to date.</p>
+                </div>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Application Pipeline */}
-        <div className="bg-white dark:bg-zinc-900 border border-slate-200 dark:border-white/5 rounded-3xl overflow-hidden shadow-sm">
-          <div className="px-6 py-4 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
-            <h3 className="font-bold text-slate-900 dark:text-white">Application Pipeline</h3>
-            <button className="text-[11px] font-bold text-blue-500 uppercase tracking-widest hover:underline flex items-center gap-1">
-              Details <ArrowRight size={12} />
-            </button>
+        {/* Right Column: Application Pipeline Glass Table */}
+        <div className="lg:col-span-2 bg-white/80 backdrop-blur-2xl border border-slate-200/80 rounded-2xl overflow-hidden shadow-2xs flex flex-col">
+          
+          <div className="p-4 border-b border-slate-200/60 bg-slate-50/50 flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <div className="w-8 h-8 rounded-xl bg-slate-100 border border-slate-200/60 flex items-center justify-center text-slate-700 shrink-0">
+                <Layers size={16} />
+              </div>
+              <div>
+                <h3 className="font-display font-bold text-base text-slate-900">Application Pipeline</h3>
+                <p className="text-xs text-slate-500">Latest automated job submissions and fit scores.</p>
+              </div>
+            </div>
+            
+            <a
+              href="/dashboard/applications"
+              className="inline-flex items-center gap-1 text-[11px] font-bold text-slate-700 hover:text-slate-950 bg-slate-100 hover:bg-slate-200 border border-slate-200/80 px-3 py-1.5 rounded-xl transition-all"
+            >
+              View All Applications <ArrowRight size={13} />
+            </a>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-sm">
+
+          <div className="flex-1 overflow-x-auto">
+            <table className="w-full text-left text-xs">
               <thead>
-                <tr className="text-slate-400 border-b border-slate-50 dark:border-white/5">
-                  <th className="px-6 py-4 font-semibold uppercase text-[10px] tracking-wider">Company</th>
-                  <th className="px-6 py-4 font-semibold uppercase text-[10px] tracking-wider">Position</th>
-                  <th className="px-6 py-4 font-semibold uppercase text-[10px] tracking-wider">Fit</th>
-                  <th className="px-6 py-4 font-semibold uppercase text-[10px] tracking-wider">Status</th>
+                <tr className="text-slate-400 border-b border-slate-200/60 bg-slate-50/30 select-none">
+                  <th className="px-4 py-2.5 font-mono font-bold uppercase text-[9px] tracking-wider">Company</th>
+                  <th className="px-4 py-2.5 font-mono font-bold uppercase text-[9px] tracking-wider">Position</th>
+                  <th className="px-4 py-2.5 font-mono font-bold uppercase text-[9px] tracking-wider">AI Fit</th>
+                  <th className="px-4 py-2.5 font-mono font-bold uppercase text-[9px] tracking-wider">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-50 dark:divide-white/5">
-                {apps.slice(0, 5).map((app, i) => (
-                  <tr key={i} className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
-                    <td className="px-6 py-4 font-bold text-slate-900 dark:text-white">{app.company}</td>
-                    <td className="px-6 py-4 text-slate-600 dark:text-slate-400">{app.job_title}</td>
-                    <td className="px-6 py-4">
-                      <div className="flex items-center gap-2">
-                        <div className="w-12 h-1 bg-slate-100 dark:bg-white/10 rounded-full overflow-hidden">
-                          <div className="bg-blue-500 h-full" style={{ width: `${app.fit_score || 0}%` }}></div>
-                        </div>
-                        <span className="text-xs font-bold text-blue-500">{app.fit_score}%</span>
+              <tbody className="divide-y divide-slate-100">
+                {apps.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="px-4 py-12 text-center">
+                      <div className="w-10 h-10 rounded-xl bg-slate-100 text-slate-400 flex items-center justify-center mx-auto mb-2 shadow-2xs">
+                        <Layers size={20} />
                       </div>
-                    </td>
-                    <td className="px-6 py-4">
-                      <span className="px-2 py-1 rounded-md bg-blue-500/10 text-blue-500 text-[10px] font-bold uppercase tracking-widest">
-                        {app.current_status}
-                      </span>
+                      <p className="text-slate-700 font-bold text-xs">No applications submitted yet.</p>
+                      <p className="text-slate-400 text-[11px] mt-0.5">Start a discovery mission to begin auto-applying.</p>
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  apps.slice(0, 5).map((app, i) => (
+                    <tr key={i} className="group hover:bg-slate-50/60 transition-colors">
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-7 h-7 rounded-lg bg-slate-100 border border-slate-200/60 flex items-center justify-center text-slate-700 font-bold shrink-0">
+                            <Building2 size={14} />
+                          </div>
+                          <span className="font-bold text-slate-900 text-xs">{app.company}</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 text-slate-700 font-medium text-xs">{app.job_title}</td>
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-14 h-1.5 bg-slate-100 rounded-full overflow-hidden border border-slate-200/50">
+                            <div
+                              className="bg-emerald-500 h-full rounded-full transition-all"
+                              style={{ width: `${app.fit_score || 0}%` }}
+                            />
+                          </div>
+                          <span className="font-mono text-xs font-bold text-emerald-700">{app.fit_score || 0}%</span>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="inline-flex items-center gap-1 font-mono px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 border border-emerald-200/70 text-[9px] font-bold uppercase tracking-wider">
+                          <CheckCircle2 size={11} /> {app.current_status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
         </div>
+
       </div>
     </div>
   )

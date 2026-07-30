@@ -3,19 +3,47 @@
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --paper: #FAF9F6;
+  --ink: #14161A;
+  --ink-soft: #2A2D34;
+  --slate: #5B616E;
+  --line: #E4E2DB;
+  --signal: #E8FF5A;
+  --signal-ink: #3A4400;
+  --moss: #2F6F4E;
+  --clay: #C4553B;
+  --surface: #FFFFFF;
+  --radius: 14px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+.dark {
+  --paper: #0E0F12;
+  --ink: #F3F2EE;
+  --ink-soft: #C9C8C3;
+  --slate: #9BA0AB;
+  --line: #24262C;
+  --surface: #16181D;
 }
+
+* { border-color: var(--line); }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: var(--font-inter), Arial, Helvetica, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-inter), system-ui, sans-serif;
+}
+
+.font-display { font-family: var(--font-space-grotesk), var(--font-inter), sans-serif; }
+.font-mono { font-family: var(--font-jetbrains-mono), monospace; }
+
+/* Agent status strip pulse */
+@keyframes signal-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+.signal-dot { animation: signal-pulse 1.6s ease-in-out infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .signal-dot { animation: none; }
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }

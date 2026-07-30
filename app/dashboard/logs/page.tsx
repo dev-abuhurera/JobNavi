@@ -1,163 +1,206 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Terminal, Clock, ShieldCheck, AlertCircle, Info } from 'lucide-react'
+import { Terminal, ShieldCheck, AlertCircle, Info, Trash2, Activity, Sparkles } from 'lucide-react'
 
 export default function LogsPage() {
   const [logs, setLogs] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const supabase = createClient()
 
-  useEffect(() => {
-    fetchLogs()
-    
-    // Subscribe to INSERT AND DELETE events
-    const channel = supabase
-      .channel('activity_logs_realtime')
-      .on('postgres_changes', { 
-        event: 'INSERT', 
-        schema: 'public', 
-        table: 'activity_logs' 
-      }, (payload) => {
-        setLogs(current => [payload.new, ...current].slice(0, 50))
-      })
-      .on('postgres_changes', { 
-        event: 'DELETE', 
-        schema: 'public', 
-        table: 'activity_logs' 
-      }, (payload) => {
-        // Remove deleted log from UI
-        setLogs(current => current.filter(log => log.id !== payload.old.id))
-      })
-      .subscribe()
-
-    return () => {
-      supabase.removeChannel(channel)
-    }
-  }, [])
-
-  const fetchLogs = async () => {
+  const fetchLogs = useCallback(async () => {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-    
-    const { data } = await supabase
-      .from('activity_logs')
-      .select('*')
-      .eq('user_id', user.id)
-      .order('created_at', { ascending: false })
-      .limit(50)
-    
+    const { data } = await supabase.from('activity_logs').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50)
     if (data) setLogs(data)
     setLoading(false)
-  }
+  }, [supabase])
 
-  const handleClearLogs = async () => {
-    if (!window.confirm('Are you sure you want to delete all logs from the database?')) return
-    
+  const chanRef = useRef<any>(null)
+  useEffect(() => {
+    fetchLogs()
+    supabase.auth.getUser().then(({ data }) => {
+      const uid = data.user?.id
+      if (!uid || chanRef.current) return
+      const ch = supabase.channel('logs-' + uid)
+      ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, (p) => setLogs(c => [p.new, ...c].slice(0, 50)))
+      ch.on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, (p) => setLogs(c => c.filter(l => l.id !== p.old.id)))
+      ch.subscribe()
+      chanRef.current = ch
+    })
+    return () => { if (chanRef.current) { supabase.removeChannel(chanRef.current); chanRef.current = null } }
+  }, [fetchLogs, supabase])
+
+  const clearLogs = async () => {
+    if (!window.confirm('Delete all logs?')) return
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-
-    setLoading(true)
-    const { error } = await supabase
-      .from('activity_logs')
-      .delete()
-      .eq('user_id', user.id)
-
-    if (error) {
-      alert(`Error clearing logs: ${error.message}`)
-    } else {
-      setLogs([])  // ✅ This clears the UI
-    }
-    setLoading(false)
+    await supabase.from('activity_logs').delete().eq('user_id', user.id)
+    setLogs([])
   }
 
-  const getLogIcon = (level: string) => {
-    switch (level?.toLowerCase()) {
-      case 'error': return <AlertCircle size={14} className="text-red-400" />
-      case 'success': return <ShieldCheck size={14} className="text-emerald-400" />
-      default: return <Info size={14} className="text-blue-400" />
+  const renderBadge = (lvl: string) => {
+    if (lvl === 'error') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold font-mono bg-rose-100 text-rose-800 border border-rose-200/80 shadow-2xs">
+          <AlertCircle size={12} className="text-rose-600 shrink-0" /> ERROR
+        </span>
+      )
     }
+    if (lvl === 'success') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold font-mono bg-emerald-100 text-emerald-800 border border-emerald-200/80 shadow-2xs">
+          <ShieldCheck size={12} className="text-emerald-600 shrink-0" /> SUCCESS
+        </span>
+      )
+    }
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[10px] font-bold font-mono bg-slate-100 text-slate-700 border border-slate-200/80 shadow-2xs">
+        <Info size={12} className="text-slate-500 shrink-0" /> INFO
+      </span>
+    )
+  }
+
+  const formatLogMessage = (msg: string) => {
+    // If msg is "Application failed for <Company>: Error: <Details>"
+    if (msg.includes('for ') && msg.includes(': Error: ')) {
+      const [beforeError, errorDetail] = msg.split(': Error: ')
+      const [action, company] = beforeError.split('for ')
+      return (
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 text-xs sm:text-sm font-sans font-normal text-slate-700 flex-wrap">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span>{action} for</span>
+            <span className="font-semibold text-slate-800 bg-slate-100/80 px-2 py-0.5 rounded-md border border-slate-200/60">{company}</span>
+          </div>
+          <span className="text-rose-600 font-normal text-xs bg-rose-50/80 border border-rose-200/50 px-2 py-0.5 rounded-md">
+            {errorDetail}
+          </span>
+        </div>
+      )
+    }
+
+    // If msg is "Processing application for <Company>..." or "Application for <Company> ended with status: <Status>"
+    if (msg.includes('for ')) {
+      const parts = msg.split('for ')
+      const action = parts[0]
+      const rest = parts.slice(1).join('for ')
+      return (
+        <div className="flex items-center gap-1.5 text-xs sm:text-sm font-sans font-normal text-slate-700 flex-wrap">
+          <span>{action} for</span>
+          <span className="font-semibold text-slate-800 bg-slate-100/80 px-2 py-0.5 rounded-md border border-slate-200/60">{rest}</span>
+        </div>
+      )
+    }
+
+    // Default clean typography
+    return (
+      <span className="text-xs sm:text-sm font-sans font-medium text-slate-700 leading-relaxed">
+        {msg}
+      </span>
+    )
   }
 
   return (
-    <div className="animate-in fade-in duration-700 h-[calc(100vh-160px)] flex flex-col">
-      <header className="mb-8 shrink-0">
-        <h1 className="text-3xl font-bold text-slate-900 dark:text-white tracking-tight">Session Logs</h1>
-        <p className="text-slate-500 dark:text-slate-400">Monitor your agent's real-time autonomous activity.</p>
+    <div className="h-[calc(100vh-96px)] flex flex-col space-y-4">
+      {/* Header */}
+      <header className="flex items-center justify-between">
+        <div className="flex items-center gap-2.5">
+          <h1 className="font-display text-3xl font-bold tracking-tight text-slate-900">Session Logs</h1>
+          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-700 border border-emerald-200/60 backdrop-blur-md">
+            <span className="relative flex h-2 w-2">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+            </span>
+            Live
+          </span>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={clearLogs}
+            className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold text-slate-700 hover:text-rose-600 bg-white/70 hover:bg-rose-50/80 border border-white/90 hover:border-rose-200 transition-all backdrop-blur-xl shadow-xs active:scale-95"
+          >
+            <Trash2 size={14} /> Clear Console
+          </button>
+        </div>
       </header>
 
-      <div className="flex-1 min-h-0 bg-black border border-white/10 rounded-3xl overflow-hidden flex flex-col shadow-2xl">
-        <div className="bg-white/5 border-b border-white/5 px-6 py-3 flex items-center justify-between shrink-0">
-          <div className="flex items-center gap-2">
-            <Terminal size={14} className="text-slate-400" />
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Agent Output Console</span>
+      {/* Main Luxury Light Frosted Glass Console Container */}
+      <div className="flex-1 min-h-0 bg-white/80 backdrop-blur-3xl border border-white/90 rounded-3xl overflow-hidden flex flex-col shadow-[0_25px_70px_rgba(0,0,0,0.07),0_10px_20px_rgba(0,0,0,0.03)] transition-all">
+        
+        {/* Sleek Light Glass Window Header */}
+        <div className="border-b border-slate-200/60 bg-gradient-to-r from-slate-50/90 via-white/90 to-slate-50/90 backdrop-blur-2xl px-6 py-4 flex items-center justify-between select-none">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="w-3 h-3 rounded-full bg-[#ff5f56] border border-[#e0443e] shadow-2xs hover:opacity-80 transition-opacity" />
+              <span className="w-3 h-3 rounded-full bg-[#ffbd2e] border border-[#dea123] shadow-2xs hover:opacity-80 transition-opacity" />
+              <span className="w-3 h-3 rounded-full bg-[#27c93f] border border-[#1aab29] shadow-2xs hover:opacity-80 transition-opacity" />
+            </div>
+            <div className="h-4 w-[1px] bg-slate-200/80 mx-1" />
+            <div className="flex items-center gap-2 text-slate-800 font-mono text-xs font-bold">
+              <Terminal size={15} className="text-emerald-600" />
+              <span>agent-worker@jobnavi:~ session.log</span>
+            </div>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></div>
-            <span className="text-[10px] font-bold text-emerald-500 uppercase tracking-widest">Live Stream</span>
+
+          <div>
+            <span className="font-mono text-[11px] font-bold text-slate-500 uppercase tracking-wider">Realtime Stream</span>
           </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 font-mono text-xs md:text-sm space-y-3 custom-scrollbar">
+        {/* Structured Divided Light Console Panel */}
+        <div className="flex-1 overflow-y-auto p-4 bg-slate-50/40">
           {loading && logs.length === 0 ? (
-            <div className="flex items-center gap-3 text-slate-500 italic">
-              <Clock size={14} className="animate-spin" />
-              <span>Initializing console connection...</span>
+            <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-3 py-16">
+              <div className="w-10 h-10 rounded-2xl bg-white border border-slate-200 flex items-center justify-center shadow-xs animate-spin">
+                <Activity size={20} className="text-emerald-600" />
+              </div>
+              <p className="text-sm font-sans font-medium text-slate-500">Connecting to agent telemetry stream...</p>
             </div>
           ) : logs.length === 0 ? (
-            <div className="flex items-center gap-3 text-slate-500 italic">
-              <Info size={14} />
-              <span>Waiting for agent activity...</span>
+            <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-3 py-16">
+              <div className="w-12 h-12 rounded-2xl bg-white border border-slate-200 flex items-center justify-center shadow-xs">
+                <Terminal size={24} className="text-slate-400" />
+              </div>
+              <p className="text-sm font-sans font-medium text-slate-500">No activity logged yet. Start a job search to populate logs.</p>
             </div>
           ) : (
-            logs.map((log) => (
-              <div key={log.id} className="flex gap-4 group animate-in slide-in-from-bottom-2 duration-300">
-                <span className="text-slate-600 shrink-0 select-none opacity-50">
-                  [{new Date(log.created_at).toLocaleTimeString([], { hour12: false })}]
-                </span>
-                <div className="flex items-start gap-2">
-                  <span className="mt-1 shrink-0">{getLogIcon(log.level)}</span>
-                  <span className={`${
-                    log.level === 'error' ? 'text-red-400' :
-                    log.level === 'success' ? 'text-emerald-400' :
-                    'text-slate-300'
-                  } break-all leading-relaxed`}>
-                    {log.msg}
-                  </span>
+            <div className="bg-white/80 border border-slate-200/80 rounded-2xl overflow-hidden divide-y divide-slate-100/80 shadow-2xs">
+              {logs.map((log, i) => (
+                <div
+                  key={`${log.id}-${i}`}
+                  className="flex items-center gap-4 px-4 py-3 hover:bg-slate-50/70 transition-colors"
+                >
+                  {/* Column 1: Timestamp */}
+                  <div className="w-24 shrink-0 font-mono text-xs font-normal text-slate-400 select-none">
+                    [{new Date(log.created_at).toLocaleTimeString([], { hour12: false })}]
+                  </div>
+
+                  {/* Column 2: Refined Level Badge */}
+                  <div className="w-24 shrink-0">
+                    {renderBadge(log.level)}
+                  </div>
+
+                  {/* Column 3: Formatted Log Message Data */}
+                  <div className="flex-1 min-w-0">
+                    {formatLogMessage(log.msg)}
+                  </div>
                 </div>
-              </div>
-            ))
+              ))}
+            </div>
           )}
         </div>
 
-        <div className="bg-white/5 border-t border-white/5 px-6 py-4 flex items-center justify-between shrink-0">
-          <p className="text-[10px] text-slate-500">Showing last 50 events. Session active.</p>
-          <button 
-            onClick={handleClearLogs}
-            disabled={loading}
-            className="text-[10px] font-bold text-slate-400 hover:text-white disabled:opacity-50 uppercase tracking-widest transition-colors"
-          >
-            Clear Console
-          </button>
+        {/* Light Glass Footer */}
+        <div className="border-t border-slate-200/60 bg-white/60 backdrop-blur-2xl px-5 py-3 flex items-center justify-between text-xs text-slate-500 font-mono">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-500" />
+            <span>Buffer: Last 50 Events</span>
+          </div>
+          <span className="text-[11px] text-slate-400 font-sans font-medium">JobNavi Autonomous Agent v0.1.0</span>
         </div>
       </div>
-
-      <style jsx>{`
-        .custom-scrollbar::-webkit-scrollbar {
-          width: 4px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-          background: transparent;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-          background: rgba(255, 255, 255, 0.1);
-          border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-          background: rgba(255, 255, 255, 0.2);
-        }
-      `}</style>
     </div>
   )
 }

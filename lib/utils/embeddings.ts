@@ -1,11 +1,9 @@
-import { pipeline } from '@xenova/transformers';
-
 let extractor: any = null;
 let modelLoadError: Error | null = null;
 let loadingPromise: Promise<any> | null = null;
 
 /**
- * Loads the embedding model with proper error handling and caching.
+ * Loads the embedding model lazily with proper error handling and caching.
  * Uses 'all-MiniLM-L6-v2' (~23MB) for speed and efficiency.
  * On first call, subsequent callers wait for the same load promise.
  */
@@ -18,7 +16,8 @@ async function getExtractor() {
 
   loadingPromise = (async () => {
     try {
-      console.log('[Embeddings] Loading transformer model: all-MiniLM-L6-v2...');
+      console.log('[Embeddings] Loading transformer model lazily: all-MiniLM-L6-v2...');
+      const { pipeline } = await import('@xenova/transformers');
       extractor = await pipeline(
         'feature-extraction',
         'Xenova/all-MiniLM-L6-v2'
@@ -108,8 +107,8 @@ export async function getSimilarity(text1: string, text2: string): Promise<numbe
       normalize: true
     });
 
-    const vec1 = Array.from(output1.data);
-    const vec2 = Array.from(output2.data);
+    const vec1 = Array.from(output1.data) as number[];
+    const vec2 = Array.from(output2.data) as number[];
 
     // Cosine similarity of normalized vectors = dot product
     const similarity = cosineSimilarity(vec1, vec2);

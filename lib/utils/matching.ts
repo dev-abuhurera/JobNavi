@@ -6,6 +6,7 @@ export interface UserProfile {
   email?: string
   phone?: string
   resume_text?: string
+  dense_summary?: string
   skills?: string[]
   experience_summary?: string
   desired_roles?: string[]
@@ -13,22 +14,37 @@ export interface UserProfile {
 }
  
 /**
- * Converts a user profile into a semantic text representation for embedding.
- * This captures the essence of what the user is looking for.
+ * Converts a user profile into a dense semantic text representation for embedding.
+ * Uses semantically compressed profile summary for high signal & low memory footprint.
  */
 export function profileToSearchText(profile: UserProfile): string {
+  // 1. Prefer compressed dense summary + skills for skills-based matching
+  if (profile.dense_summary && profile.dense_summary.trim()) {
+    const parts = [
+      profile.dense_summary,
+      profile.skills?.join(', ') || '',
+      profile.experience_summary || '',
+    ]
+    return parts.filter(p => p && p.trim()).join('. ').slice(0, 1000)
+  }
+
+  // 2. Fall back to skills & resume text excerpt
+  if (profile.resume_text && profile.resume_text.trim()) {
+    const parts = [
+      profile.skills?.slice(0, 15).join(', ') || '',
+      profile.experience_summary || '',
+      profile.resume_text.slice(0, 800),
+    ]
+    return parts.filter(p => p && p.trim()).join('. ').slice(0, 1000)
+  }
+
   const parts = [
-    profile.desired_roles?.join(', ') || 'software developer',
+    profile.skills?.join(', ') || '',
     profile.preferred_tech?.join(', ') || '',
     profile.experience_summary || '',
-    profile.skills?.slice(0, 8).join(', ') || '',
-    profile.resume_text?.slice(0, 500) || ''
-  ];
- 
-  return parts
-    .filter(p => p && p.trim())
-    .join('. ')
-    .slice(0, 1500); // Increased limit slightly for better context
+  ]
+
+  return parts.filter(p => p && p.trim()).join('. ').slice(0, 1000)
 }
  
 /**
