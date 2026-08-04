@@ -9,7 +9,8 @@ const PREF_FIELDS = [
   { key: 'work_authorized', label: 'Authorized to work in target country?', type: 'select', options: ['Yes', 'No'] },
   { key: 'willing_to_relocate', label: 'Willing to relocate?', type: 'select', options: ['Yes', 'No'] },
   { key: 'city', label: 'Location / City', type: 'text', placeholder: 'Islamabad' },
-  { key: 'expected_salary', label: 'Expected salary', type: 'text', placeholder: '80000' },
+  { key: 'expected_salary', label: 'Expected annual salary ($)', type: 'text', placeholder: '80000' },
+  { key: 'hourly_rate', label: 'Expected hourly rate ($ / hr)', type: 'text', placeholder: '35' },
   { key: 'years_of_experience', label: 'Years of experience', type: 'text', placeholder: '3' },
   { key: 'notice_period', label: 'Notice period', type: 'text', placeholder: '2 weeks' },
   { key: 'gender', label: 'Gender (optional)', type: 'text', placeholder: 'Prefer not to say' },
@@ -86,10 +87,16 @@ export default function ResumeHubPage() {
     const { error: upErr } = await supabase.storage.from('resumes').upload(filePath, file, { upsert: true })
     if (upErr) { notify('error', `Storage error: ${upErr.message}`); setUploading(false); return }
 
-    const { error: dbErr } = await supabase.from('profiles').update({
+    const nowIso = new Date().toISOString()
+    const { error: dbErr } = await supabase.from('profiles').upsert({
+      user_id: user.id,
       resume_path: 'resume.pdf',
-      profile_data: { ...(profile?.profile_data || {}), resume_filename: file.name },
-    }).eq('user_id', user.id)
+      profile_data: { 
+        ...(profile?.profile_data || {}), 
+        resume_filename: file.name,
+        resume_updated_at: nowIso,
+      },
+    }, { onConflict: 'user_id' })
 
     if (dbErr) { notify('error', `Database update failed: ${dbErr.message}`); setUploading(false); return }
 

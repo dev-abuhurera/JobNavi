@@ -60,7 +60,10 @@ export interface NormalizedProfile {
   phone: string
   city: string
   linkedin_url: string
+  portfolio_url: string
+  github_url: string
   expected_salary: string
+  hourly_rate: string
   years_of_experience: string
   website: string
   date_of_birth: string

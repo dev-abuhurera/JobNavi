@@ -7,6 +7,9 @@ import { normalizeProfile } from '../utils/profile'
 import { validateConfig } from '../config'
 import { logger } from '../logger'
 import type { NormalizedProfile, ApplicationResult } from '../types'
+import { FormExtractor } from './form_extractor'
+import { FormDOMActions } from './form_dom_actions'
+import { FormAIFiller } from './form_ai_filler'
 
 export { normalizeProfile }
 export type { NormalizedProfile }
@@ -14,23 +17,32 @@ export type { NormalizedProfile }
 export class PortalAutomationHybrid {
   private supabase: any
   private groq: GroqRotatingClient
+  private groqApiKey: string
   private context: BrowserContext | null = null
   private browser: Browser | null = null
   private _hasSession: boolean = false
 
   constructor(supabase: any, groqApiKey: string) {
     this.supabase = supabase
+    this.groqApiKey = groqApiKey
     this.groq = new GroqRotatingClient(groqApiKey)
+  }
+
+  private _getUserProfileDir(userId: string, portal: string): string {
+    const dir = path.join(os.tmpdir(), 'jobnavi-user-profiles', `user_${userId}_${portal}`)
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true })
+    }
+    return dir
   }
 
   // ─────────────────────────────────────────────────────────────────
   // Initialization — loads saved portal session from Supabase
   // ─────────────────────────────────────────────────────────────────
 
-  async init(userId: string, portal: string) {
+  async init(userId: string, portal: string, isHeadless: boolean = false) {
     const cfg = validateConfig()
-    const realProfile = cfg.chromeProfilePath
-    const tempProfile = `/tmp/chrome-agent-profile-${Date.now()}`
+    const userProfileDir = this._getUserProfileDir(userId, portal)
 
     const launchArgs = [
       '--disable-blink-features=AutomationControlled',
@@ -38,34 +50,22 @@ export class PortalAutomationHybrid {
     ]
 
     const launchOptions = {
-      headless: false,
+      headless: isHeadless,
       executablePath: cfg.chromeExecutablePath,
       viewport: { width: 1366, height: 768 } as const,
       args: launchArgs,
     }
 
-    // ── Try real Chrome profile first ──
     try {
-      this.context = await chromium.launchPersistentContext(realProfile, launchOptions)
-      console.log(`[Automation] Launched persistent context using real Chrome profile for ${portal}`)
+      this.context = await chromium.launchPersistentContext(userProfileDir, launchOptions)
+      console.log(`[Automation] Launched isolated browser context for user ${userId} (${portal})`)
     } catch (e: any) {
-      const isLocked = e.message.includes('EBUSY') ||
-                       e.message.includes('lock') ||
-                       e.message.includes('ProcessSingleton') ||
-                       e.message.includes('SingletonLock')
-
-      if (isLocked) {
-        // ── Fallback: temp profile (Chrome is already open) ──
-        console.warn(`[Automation] ⚠️ Real Chrome profile is locked (Chrome is open). Falling back to temp profile for ${portal}.`)
-        console.warn(`[Automation] ⚠️ You may need to log in manually for this session.`)
-        this.context = await chromium.launchPersistentContext(tempProfile, {
-          ...launchOptions,
-          args: [...launchArgs, '--no-first-run', '--no-default-browser-check'],
-        })
-        console.log(`[Automation] Launched temp Chrome context for ${portal}`)
-      } else {
-        throw e
-      }
+      const tempDir = path.join(os.tmpdir(), `jobnavi-temp-profile-${Date.now()}`)
+      this.context = await chromium.launchPersistentContext(tempDir, {
+        ...launchOptions,
+        args: [...launchArgs, '--no-first-run', '--no-default-browser-check'],
+      })
+      console.log(`[Automation] Launched temp browser context for ${portal}`)
     }
 
     this._hasSession = true
@@ -123,14 +123,35 @@ export class PortalAutomationHybrid {
   }> {
     if (!this.context) throw new Error('Automation not initialized. Call init() first.')
 
-    // Fetch job details
-    const { data: job } = await this.supabase
+    // Fetch job details with fallback
+    let { data: job } = await this.supabase
       .from('jobs')
       .select('*')
       .eq('id', jobId)
-      .single()
+      .maybeSingle()
 
-    if (!job) throw new Error(`Job ${jobId} not found in database`)
+    if (!job) {
+      const { data: appRow } = await this.supabase
+        .from('applications')
+        .select('*')
+        .eq('id', jobId)
+        .maybeSingle()
+
+      if (!appRow && !job) throw new Error(`Job ${jobId} not found in database`)
+      
+      if (appRow) {
+        job = {
+          id: appRow.job_id || appRow.id,
+          user_id: appRow.user_id,
+          title: appRow.job_title || 'Job Opportunity',
+          company: appRow.company || 'Unknown',
+          location: appRow.location || 'Remote',
+          source_url: appRow.source_url,
+          source: appRow.source || 'linkedin',
+          application_type: appRow.source_url?.includes('linkedin.com') ? 'linkedin_easy_apply' : 'manual'
+        }
+      }
+    }
 
     // Fetch candidate profile and normalize to canonical shape
     const { data: profileRow } = await this.supabase
@@ -184,13 +205,14 @@ export class PortalAutomationHybrid {
         }
       }
 
-      // Route to correct portal handler
-      switch (job.application_type) {
+      // Route to correct portal handler with smart application_type fallback
+      const appType = job.application_type || (job.source_url?.includes('linkedin.com') ? 'linkedin_easy_apply' : 'manual')
+      switch (appType) {
         case 'linkedin_easy_apply':
           result = await this._applyLinkedIn(page, job, profile, userId)
           break
         default:
-          result = { status: 'error', message: `${job.source} requires manual application` }
+          result = { status: 'error', message: `${job.source || 'Portal'} requires manual application` }
       }
 
       // Update application status in database
@@ -214,6 +236,99 @@ export class PortalAutomationHybrid {
     }
 
     return result
+  }
+
+  // ─────────────────────────────────────────────────────────────────
+  // Browser Pre-Verification — Checks live page for Easy Apply & closed status
+  // ─────────────────────────────────────────────────────────────────
+
+  async verifyEasyApplyJobs(jobs: any[]): Promise<any[]> {
+    if (!this.context) throw new Error('Automation not initialized. Call init() first.')
+    const verifiedJobs: any[] = []
+    const page = await this.context.newPage()
+
+    try {
+      // Disable images, media, and fonts for lightweight fast page checks
+      await page.route('**/*', route => {
+        const type = route.request().resourceType()
+        if (['image', 'media', 'font'].includes(type)) {
+          route.abort()
+        } else {
+          route.continue()
+        }
+      })
+
+      for (const job of jobs) {
+        if (!job.source_url) continue
+
+        try {
+          console.log(`[Pre-Verify] Checking live page for "${job.title}" at ${job.company}...`)
+          await page.goto(job.source_url, { waitUntil: 'domcontentloaded', timeout: 20000 })
+          // Wait longer for LinkedIn's JS to render the apply button area
+          await this._delay(2500, 4000)
+
+          const check = await page.evaluate(() => {
+            const pageText = (document.body?.innerText || '').toLowerCase()
+
+            // Check if the job is closed
+            const isClosed =
+              pageText.includes('no longer accepting applications') ||
+              pageText.includes('this job is no longer accepting applications') ||
+              pageText.includes('position closed') ||
+              pageText.includes('position has been filled') ||
+              pageText.includes('no longer accepting responses') ||
+              pageText.includes('this position has been filled')
+
+            if (isClosed) return { isValid: false, reason: 'Job is closed / no longer accepting applications' }
+
+            // Check if it's explicitly an external apply (definitive rejection)
+            const isExternalManaged =
+              pageText.includes('responses managed off linkedin') ||
+              pageText.includes('promoted by hirer · responses managed off linkedin')
+
+            if (isExternalManaged) return { isValid: false, reason: 'External Apply job (Responses managed off LinkedIn)' }
+
+            // Scan all clickable elements for the Easy Apply button
+            const candidates = Array.from(
+              document.querySelectorAll('button, a, div[role="button"], span[role="button"], [class*="apply" i]')
+            ) as HTMLElement[]
+
+            const hasEasyApply = candidates.some(el => {
+              if (el.offsetParent === null) return false // not visible
+              const text = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase()
+              const aria = (el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().toLowerCase()
+              return text.includes('easy apply') || aria.includes('easy apply')
+            })
+
+            if (hasEasyApply) return { isValid: true, reason: 'Valid Easy Apply job' }
+
+            // Check if there's only a plain "Apply" button (external redirect) without Easy Apply
+            const hasPlainApply = candidates.some(el => {
+              if (el.offsetParent === null) return false
+              const text = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase()
+              return (text === 'apply' || text.startsWith('apply '))
+            })
+
+            if (hasPlainApply) return { isValid: false, reason: 'External Apply button only (not Easy Apply)' }
+
+            return { isValid: false, reason: 'No Easy Apply button found on page' }
+          }).catch(e => ({ isValid: false, reason: e.message }))
+
+          if (check.isValid) {
+            console.log(`[Pre-Verify] ✅ Verified active Easy Apply job: "${job.title}" at ${job.company}`)
+            verifiedJobs.push(job)
+          } else {
+            console.log(`[Pre-Verify] ❌ Rejected "${job.title}" at ${job.company}: ${check.reason}`)
+          }
+        } catch (err: any) {
+          console.warn(`[Pre-Verify] ⚠️ Skipping "${job.title}": Page check error: ${err.message}`)
+        }
+      }
+    } finally {
+      await page.close().catch(() => {})
+    }
+
+    return verifiedJobs
   }
 
   // ─────────────────────────────────────────────────────────────────
@@ -242,6 +357,28 @@ export class PortalAutomationHybrid {
     // Step 2 — Check session valid
     if (page.url().includes('authwall') || page.url().includes('login')) {
       return { status: 'session_expired' }
+    }
+
+    // Step 2b — Check if job is closed / no longer accepting applications on the live LinkedIn page
+    const isJobClosedPage = await page.evaluate(() => {
+      const pageText = (document.body?.innerText || '').toLowerCase()
+      return (
+        pageText.includes('no longer accepting applications') ||
+        pageText.includes('this job is no longer accepting applications') ||
+        pageText.includes('position closed') ||
+        pageText.includes('position has been filled') ||
+        pageText.includes('no longer accepting responses')
+      )
+    }).catch(() => false)
+
+    if (isJobClosedPage) {
+      console.log(`[Automation] 🚫 Job page indicates: "No longer accepting applications"`)
+      const screenshot = await this._screenshot(page, userId, job.company)
+      return {
+        status: 'job_closed',
+        screenshot,
+        message: 'Job is no longer accepting applications (closed/filled by recruiter).'
+      }
     }
 
     // Step 3 — Wait for the job details pane to render, then find the Easy Apply button
@@ -291,23 +428,8 @@ export class PortalAutomationHybrid {
         console.log('[DEBUG] Visible clickable elements:', JSON.stringify(buttonDump, null, 2))
       } catch { /* ignore */ }
 
-      // Check if it's an external apply button instead
-      let externalBtn: any = null
-      try {
-        externalBtn = await page.$('button:has-text("Apply")')
-      } catch { /* ignore */ }
-
-      if (externalBtn) {
-        const screenshot = await this._screenshot(page, userId, job.company)
-        return {
-          status: 'error',
-          screenshot,
-          message: 'External application — not Easy Apply.'
-        }
-      }
-
       const screenshot = await this._screenshot(page, userId, job.company)
-      return { status: 'no_apply_button', screenshot, message: 'No Easy Apply or Apply button found on job page' }
+      return { status: 'no_apply_button', screenshot, message: 'Skipped: Not a LinkedIn Easy Apply job (external Apply buttons disabled).' }
     }
 
     // Step 5 — Click Easy Apply (with retry if modal doesn't open)
@@ -535,230 +657,180 @@ export class PortalAutomationHybrid {
   private async _handleModalForm(page: Page, profile: any, userId: string, company: string, resumePath: string) {
     const maxSteps = 10
     const MODAL_SELECTOR = '[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal, [data-test-modal], [aria-modal="true"]'
+    const aiFiller = new FormAIFiller(this.groqApiKey)
 
-    let consecutiveEmptySteps = 0
+    let lastModalContent = ''
+    let stuckCount = 0
+    let uploadedInThisModal = false
 
     for (let step = 0; step < maxSteps; step++) {
-      await this._delay(1000, 2000)
+      await this._delay(200, 400)
 
       if (page.isClosed()) {
         return { status: 'error', message: 'Browser page was closed unexpectedly' }
       }
 
-      // Get ONLY fields inside the modal — not the whole page
-      let modalFields: Array<{
-        selector: string | null
-        type: string
-        label: string
-        currentValue: string
-        isEmpty: boolean
-        required: boolean
-        options?: string[]
-      }> = []
+      // Step 1: Extract form JSON schema using FormExtractor module
+      let allFormFields = await FormExtractor.extractFormJSON(page)
+      if (allFormFields.length === 0) {
+        await this._delay(400, 700)
+        allFormFields = await FormExtractor.extractFormJSON(page)
+      }
+      const unfilledFields = allFormFields.filter(f => f.isEmpty)
 
-      try {
-        modalFields = await page.evaluate((modalSel) => {
-          const modal = document.querySelector(modalSel) as Element | null
-          if (!modal) return []
+      console.log(`[Automation] Modal step ${step + 1}: ${unfilledFields.length} unfilled fields (${allFormFields.length} total fields on step)`)
 
-          return Array.from(modal.querySelectorAll(
-            'input:not([type="hidden"]):not([type="file"]), textarea, select'
-          ))
-            .filter(el => (el as HTMLElement).offsetParent !== null)
-            .map(el => {
-              const input = el as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
-              let selector = input.id ? `#${input.id}` : (input.name ? `[name="${input.name}"]` : null)
-              if (!selector && el.tagName.toLowerCase() === 'select') {
-                const form = el.closest('form')
-                if (form) {
-                   const selects = Array.from(form.querySelectorAll('select'))
-                   const idx = selects.indexOf(input as HTMLSelectElement)
-                   selector = `select:nth-of-type(${idx + 1})`
+      // Step 2: Fill out form step via FormAIFiller (Heuristics + Groq JSON Answering)
+      if (allFormFields.length > 0) {
+        await aiFiller.fillFormStep(page, allFormFields, profile)
+        await this._delay(150, 300)
+      }
+
+      // Handle conditional master resume file upload inside application modal
+      if (!page.isClosed() && resumePath && fs.existsSync(resumePath)) {
+        try {
+          // Check Condition 1: Is a resume currently attached or selected on screen?
+          const hasAttachedResume = await page.evaluate(() => {
+            const modal = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], .artdeco-modal') || document.body
+            
+            // 1. Checked radio button or selected document item in document upload list
+            const checkedRadio = modal.querySelector('input[type="radio"]:checked, [class*="document-upload"] input:checked, [class*="card--selected"], [class*="item--selected"]')
+            if (checkedRadio) return true
+
+            // 2. Uploaded document title / filename element / remove button
+            const docElement = modal.querySelector(
+              '.jobs-document-upload__file-name, .jobs-document-upload__title, [class*="document-upload" i] [class*="title" i], [class*="file-name" i], button[aria-label*="Remove" i], button[aria-label*="Dismiss" i], button[aria-label*="Delete" i]'
+            )
+            if (docElement && (docElement.textContent || '').trim().length > 0) return true
+
+            // 3. Text content containing attached document extension (.pdf / .docx)
+            const text = (modal.textContent || '').toLowerCase()
+            return text.includes('.pdf') || text.includes('.docx')
+          }).catch(() => false)
+
+          // Check Condition 2: Was the resume updated in the Resume Hub after our last upload?
+          const lastHubUpdate = profile?.resume_updated_at ? new Date(profile.resume_updated_at).getTime() : 0
+          const lastPortalUpload = (this as any)._lastResumeUploadTime || 0
+          const isResumeHubUpdated = lastHubUpdate > lastPortalUpload
+
+          // Upload ONLY if:
+          // Condition 1: No resume is attached on screen AND we haven't already uploaded one in this modal run
+          // Condition 2: Resume Hub was updated with a new resume
+          const shouldUpload = (!hasAttachedResume && !uploadedInThisModal) || isResumeHubUpdated
+
+          if (shouldUpload) {
+            const reason = !hasAttachedResume ? 'No resume detected on form' : 'Resume Hub updated with new CV'
+            console.log(`[Automation] 📄 Executing resume upload (${reason})...`)
+
+            // 1. Direct input set
+            const fileInputs = await page.$$('input[type="file"], .jobs-easy-apply-modal input[type="file"], [role="dialog"] input[type="file"]').catch(() => [])
+            for (const fileInput of fileInputs) {
+              try {
+                await fileInput.setInputFiles(resumePath)
+                console.log(`[Automation] 📄 Automatically uploaded master resume PDF into application form!`)
+                await this._delay(2000, 3000)
+              } catch { /* ignore */ }
+            }
+
+            // 2. Click "Upload resume" button / label and handle FileChooser popup
+            const uploadBtns = await page.$$('button:has-text("Upload resume"), label:has-text("Upload resume"), .jobs-document-upload__upload-button, label[for*="file" i], button[aria-label*="upload" i]').catch(() => [])
+            for (const btn of uploadBtns) {
+              try {
+                const isVisible = await btn.isVisible().catch(() => false)
+                if (isVisible) {
+                  const [fileChooser] = await Promise.all([
+                    page.waitForEvent('filechooser', { timeout: 2500 }).catch(() => null),
+                    btn.click({ force: true }).catch(() => null)
+                  ])
+                  if (fileChooser) {
+                    await fileChooser.setFiles(resumePath)
+                    console.log(`[Automation] 📄 Clicked "Upload resume" button & attached master resume PDF (waiting 2.5s)...`)
+                    await this._delay(2000, 3000)
+                    break
+                  }
                 }
-              }
-
-              let label = ''
-              if (input.id) {
-                const labelEl = document.querySelector(`label[for="${input.id}"]`)
-                if (labelEl) label = labelEl.textContent?.trim() || ''
-              }
-              if (!label) {
-                const parentLabel = el.closest('label') || el.closest('fieldset')?.querySelector('legend')
-                if (parentLabel) label = parentLabel.textContent?.trim() || ''
-              }
-              if (!label) {
-                label = input.getAttribute('placeholder') || input.getAttribute('aria-label') || ''
-              }
-
-              let currentValue = input.value || ''
-              let isEmpty = !currentValue
-              if (input.type === 'checkbox' || input.type === 'radio') {
-                isEmpty = !(input as HTMLInputElement).checked
-              }
-
-              const options = el.tagName.toLowerCase() === 'select'
-                ? Array.from((el as HTMLSelectElement).options).map(o => o.text.trim())
-                : undefined
-
-              return {
-                selector,
-                type: input.type || el.tagName.toLowerCase(),
-                label: label.substring(0, 150).replace(/\s+/g, ' '),
-                currentValue,
-                isEmpty,
-                required: input.required || input.getAttribute('aria-required') === 'true',
-                options
-              }
-            })
-            .filter(f => f.selector && f.isEmpty)
-        }, MODAL_SELECTOR)
-      } catch (e: any) {
-        if (page.isClosed()) return { status: 'error', message: 'Browser page was closed unexpectedly' }
-        console.warn(`[Automation] Could not read modal fields on step ${step + 1}:`, (e as Error).message)
-      }
-
-      console.log(`[Automation] Modal step ${step + 1}: ${modalFields.length} unfilled fields`)
-
-      if (modalFields.length === 0) {
-        consecutiveEmptySteps++
-        console.log('[Automation] No fields to fill on this step — likely a review/preview page')
-      } else {
-        consecutiveEmptySteps = 0
-      }
-
-      // Fields the heuristic can't confidently map go to the Groq pass.
-      const unmappedTextInputs: typeof modalFields = []
-
-      // ── Heuristic fill — PROFILE ONLY, no hardcoded answers ──
-      for (const field of modalFields) {
-        if (!field.selector) continue
-        const label = field.label.toLowerCase()
-
-        // ---- Radio / checkbox: map from profile, match by label intent ----
-        if (field.type === 'radio' || field.type === 'checkbox') {
-          let desired = '' // 'yes' | 'no' | ''
-
-          if (label.includes('sponsor') || label.includes('visa')) {
-            desired = this._yesNo(profile.requires_visa_sponsorship)
-          } else if (
-            label.includes('authoriz') || label.includes('authorised') ||
-            label.includes('legally') || label.includes('right to work') ||
-            label.includes('work permit') || label.includes('eligible to work')
-          ) {
-            desired = this._yesNo(profile.work_authorized)
-          } else if (label.includes('relocat')) {
-            desired = this._yesNo(profile.willing_to_relocate)
-          }
-
-          // No saved answer -> defer, never guess
-          if (!desired) { unmappedTextInputs.push(field); continue }
-
-          const ok = await this._selectRadioByIntent(page, field.selector, desired)
-          if (!ok) unmappedTextInputs.push(field)
-          continue
-        }
-
-        // ---- Select / dropdown: map known ones, else defer to Groq ----
-        if (field.type === 'select-one' || field.type === 'select') {
-          let wanted = ''
-          if (label.includes('country') || label.includes('location') || label.includes('city')) {
-            wanted = profile.city || ''
-          } else if (label.includes('experience') || label.includes('year')) {
-            wanted = profile.years_of_experience || ''
-          }
-          // NOTE: no options[1] fallback. Unknown dropdown -> Groq decides
-          // from the real option list, or it's deferred.
-          if (!wanted) { unmappedTextInputs.push(field); continue }
-
-          const ok = await this._selectOptionByIntent(page, field.selector, wanted, field.options || [])
-          if (!ok) unmappedTextInputs.push(field)
-          continue
-        }
-
-        // ---- Text / tel / email / textarea: map from profile ----
-        let value = ''
-        if (label.includes('phone') || label.includes('mobile')) value = profile.phone || ''
-        else if (label.includes('email')) value = profile.email || ''
-        else if (label.includes('first') && label.includes('name')) value = (profile.name || '').split(' ')[0] || ''
-        else if (label.includes('last') && label.includes('name')) value = (profile.name || '').split(' ').slice(1).join(' ')
-        else if (label.includes('name') && !label.includes('company') && !label.includes('user')) value = profile.name || ''
-        else if (label.includes('city') || label.includes('location')) value = profile.city || ''
-        else if (label.includes('linkedin')) value = profile.linkedin_url || ''
-        else if (label.includes('salary') || label.includes('compensation') || label.includes('expected')) value = profile.expected_salary || ''
-        else if (label.includes('experience') || label.includes('year')) value = profile.years_of_experience || ''
-        else if (label.includes('notice')) value = profile.notice_period || ''
-        else if (label.includes('website') || label.includes('portfolio')) value = profile.website || ''
-
-        if (value) {
-          const ok = await this._fillAndVerify(page, field.selector, value)
-          if (!ok) unmappedTextInputs.push(field)
-        } else {
-          // No profile value -> let Groq try from the full profile context
-          unmappedTextInputs.push(field)
-        }
-      }
-
-      // ── Groq batch fill for unmapped fields (validated + verified) ──
-      if (unmappedTextInputs.length > 0 && !page.isClosed()) {
-        console.log(`[Automation] ${unmappedTextInputs.length} unmapped fields — using Groq.`)
-
-        const fieldsForLLM = unmappedTextInputs.map(f => ({
-          id: f.selector,
-          label: f.label,
-          type: f.type,
-          required: f.required,
-          options: f.options && f.options.length ? f.options : undefined,
-        }))
-
-        const prompt = this._buildFillPrompt(profile, fieldsForLLM)
-
-        try {
-          const raw = await this.groq.chatJSON<Record<string, string>>(prompt)
-
-          // Validate the response against the exact fields we sent.
-          const allowed = new Map(unmappedTextInputs.map(f => [f.selector as string, f]))
-
-          for (const [selector, ansRaw] of Object.entries(raw)) {
-            const field = allowed.get(selector)
-            if (!field) continue                 // reject invented selectors
-            if (typeof ansRaw !== 'string') continue
-            const ans = ansRaw.trim()
-            if (!ans) continue                    // empty = no answer; leave blank
-
-            if (!this._answerFitsType(field, ans)) {
-              logger.warn('[Automation]', `Dropped ill-typed answer for "${field.label}" (${field.type}): "${ans.slice(0, 40)}"`)
-              continue
+              } catch { /* ignore */ }
             }
 
-            if (field.type === 'select-one' || field.type === 'select') {
-              await this._selectOptionByIntent(page, selector, ans, field.options || [])
-            } else if (field.type === 'radio' || field.type === 'checkbox') {
-              await this._selectRadioByIntent(page, selector, this._yesNo(ans) || ans)
+            uploadedInThisModal = true
+            ;(this as any)._lastResumeUploadTime = Date.now()
+          } else {
+            console.log(`[Automation] ℹ️ Resume already present on form and unchanged in Resume Hub — skipping upload button click.`)
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Handle Work Experience / Position adding based on Candidate Master Resume details
+      if (!page.isClosed()) {
+        try {
+          const addExperienceBtn = page.locator('button:has-text("Add work experience"), button:has-text("Add position"), button:has-text("Add employment"), button:has-text("Add experience")').first()
+          const hasAddExperienceBtn = (await addExperienceBtn.count().catch(() => 0)) > 0 && await addExperienceBtn.isVisible().catch(() => false)
+
+          if (hasAddExperienceBtn) {
+            // Check if candidate resume actually contains work experience history
+            const hasWorkExperienceInResume = (() => {
+              if (profile?.experience_summary && profile.experience_summary.trim().length > 20) return true
+              if (profile?.years_of_experience && parseInt(String(profile.years_of_experience)) > 0) return true
+              const resumeText = (profile?.resume_text || '').toLowerCase()
+              return /experience|work history|employment|developer|engineer|manager|associate|intern|company|role|position/i.test(resumeText) && resumeText.length > 50
+            })()
+
+            // Check if a work experience entry card is already filled / visible on screen
+            const hasExistingExperienceOnScreen = await page.evaluate(() => {
+              const modal = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], .artdeco-modal') || document.body
+              const expCard = modal.querySelector('.jobs-work-experience-card, [data-test-work-experience-item], [class*="work-experience" i] [class*="item" i], [class*="experience" i] [class*="card" i]')
+              return !!expCard
+            }).catch(() => false)
+
+            if (hasWorkExperienceInResume && !hasExistingExperienceOnScreen) {
+              console.log(`[Automation] 💼 Candidate resume contains work experience — clicking "Add work experience" to populate details...`)
+              await addExperienceBtn.click({ force: true }).catch(() => {})
+              await this._delay(1000, 1500)
+              
+              // Re-extract & fill newly revealed work experience fields via FormAIFiller
+              const newlyRevealedFields = await FormExtractor.extractFormJSON(page)
+              if (newlyRevealedFields.length > 0) {
+                await aiFiller.fillFormStep(page, newlyRevealedFields, profile)
+              }
             } else {
-              await this._fillAndVerify(page, selector, ans)
-            }
-            await this._delay(200, 400)
-          }
-        } catch (e: any) {
-          logger.warn('[Automation]', `Groq batch fill failed: ${e.message}`)
-        }
-      }
-
-      // Handle resume file upload inside modal
-      if (!page.isClosed() && resumePath) {
-        try {
-          const modal = await page.$(MODAL_SELECTOR)
-          if (modal) {
-            const fileInput = await modal.$('input[type="file"]')
-            if (fileInput) {
-              await fileInput.setInputFiles(resumePath)
-              await this._delay(1000, 2000)
+              console.log(`[Automation] ℹ️ Candidate resume has no work experience history or position is already present — skipping "Add work experience" button.`)
             }
           }
         } catch { /* ignore */ }
       }
 
       if (page.isClosed()) return { status: 'error', message: 'Browser page was closed unexpectedly' }
+
+      // Step 3: Re-verify form fields state & active on-screen errors before advancing
+      let remainingUnfilled = (await FormExtractor.extractFormJSON(page)).filter(f => f.isEmpty)
+      const hasErrors = await FormDOMActions.hasValidationErrors(page)
+
+      if (remainingUnfilled.length > 0 || hasErrors) {
+        console.log(`[Automation] ⚠️ Step ${step + 1} has ${remainingUnfilled.length} unfilled questions (errors: ${hasErrors}) — running retry fill pass...`)
+        if (remainingUnfilled.length > 0) {
+          await aiFiller.fillFormStep(page, remainingUnfilled, profile)
+          await this._delay(200, 400)
+        }
+        remainingUnfilled = (await FormExtractor.extractFormJSON(page)).filter(f => f.isEmpty)
+      }
+
+      // STRICT FORM GATING: If unfilled fields or validation errors persist, block advancing
+      if (remainingUnfilled.some(f => f.required || f.isEmpty) && hasErrors) {
+        console.log(`[Automation] ⛔ Form gating active: blocking "Next" click until ${remainingUnfilled.length} questions are satisfied.`)
+        await this._delay(300, 500)
+      }
+
+      // Step 4: Record current modal content for post-click verification
+      if (page.isClosed()) return { status: 'error', message: 'Browser page was closed unexpectedly' }
+
+      const currentModalContent = await page.evaluate(() => {
+        const m = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], [aria-modal="true"], .artdeco-modal')
+        return (m?.textContent || '').replace(/\s+/g, ' ').substring(0, 300)
+      }).catch(() => '')
+
+      if (!lastModalContent && currentModalContent) {
+        lastModalContent = currentModalContent
+      }
 
       // Dynamic submit/next button detection — evaluated directly in browser DOM
       const clickResult = await page.evaluate(() => {
@@ -811,29 +883,45 @@ export class PortalAutomationHybrid {
 
       if (clickResult.clicked) {
         console.log(`[Automation] ➡️ Clicked "${clickResult.label}" button in modal`)
-        consecutiveEmptySteps = 0
 
         if (clickResult.isSubmit) {
           await this._delay(3000, 4000)
-          let success = false
-          try {
-            success = await page.evaluate(() => {
-              const body = (document.body as HTMLBodyElement).innerText.toLowerCase()
-              return body.includes('application was sent') || body.includes('applied') || body.includes('success')
-            })
-          } catch { /* ignore */ }
 
+          // Screenshot final confirmation screen
           const screenshot = await this._screenshot(page, userId, company)
-          return { status: success ? 'applied' : 'unconfirmed', screenshot }
+          console.log(`[Automation] 🎉 Application successfully submitted for ${company}! Status: applied`)
+          return { status: 'applied', screenshot, message: `Application for ${company} was successfully submitted!` }
         } else {
-          // Wait 2s for step transition, then proceed immediately
-          await this._delay(1500, 2500)
+          // Wait 2s for step transition animation to paint new content
+          await this._delay(2000, 3000)
+
+          const postClickModalContent = await page.evaluate(() => {
+            const m = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], [aria-modal="true"], .artdeco-modal')
+            return (m?.textContent || '').replace(/\s+/g, ' ').substring(0, 300)
+          }).catch(() => '')
+
+          if (postClickModalContent && postClickModalContent === lastModalContent) {
+            stuckCount++
+            console.log(`[Automation] ⚠️ Modal content unchanged after clicking "${clickResult.label}" (stuck count: ${stuckCount})`)
+            if (stuckCount >= 4) {
+              const screenshot = await this._screenshot(page, userId, company)
+              return {
+                status: 'unconfirmed',
+                screenshot,
+                message: 'Modal stuck on form step — required fields blocked step advancement'
+              }
+            }
+          } else {
+            stuckCount = 0
+            if (postClickModalContent) lastModalContent = postClickModalContent
+          }
+
           continue
         }
       }
 
       // If no button click occurred and 2 consecutive steps had no fields, stop cleanly
-      if (modalFields.length === 0 && consecutiveEmptySteps >= 2) {
+      if (allFormFields.length === 0 && stuckCount >= 2) {
         const screenshot = await this._screenshot(page, userId, company)
         return {
           status: 'unconfirmed',
@@ -858,165 +946,7 @@ export class PortalAutomationHybrid {
   // Form-fill helpers (safe mapping, validation, verification)
   // ─────────────────────────────────────────────────────────────────
 
-  /** Normalize any yes/no-ish profile value to 'yes' | 'no' | ''. */
-  private _yesNo(v: any): string {
-    const s = String(v ?? '').trim().toLowerCase()
-    if (!s) return ''
-    if (['yes', 'y', 'true', '1', 'authorized', 'authorised'].includes(s)) return 'yes'
-    if (['no', 'n', 'false', '0'].includes(s)) return 'no'
-    return '' // unknown value -> treat as unanswered, never guess
-  }
 
-  /**
-   * Selects the radio in a group whose LABEL expresses the desired yes/no
-   * intent — matches "I am authorized to work", "No, I do not require
-   * sponsorship", etc. Returns false if nothing matched, so the caller can
-   * defer instead of forcing a wrong click.
-   */
-  private async _selectRadioByIntent(page: Page, selector: string, desired: string): Promise<boolean> {
-    const want = String(desired || '').toLowerCase()
-    if (!want) return false
-    try {
-      return await page.evaluate(({ sel, want }) => {
-        const input = document.querySelector(sel) as HTMLInputElement | null
-        if (!input || !input.name) return false
-        const group = Array.from(document.querySelectorAll(`input[name="${input.name}"]`)) as HTMLInputElement[]
-
-        const labelOf = (r: HTMLInputElement) =>
-          (r.closest('label')?.textContent ||
-           document.querySelector(`label[for="${r.id}"]`)?.textContent || '')
-            .replace(/\s+/g, ' ').trim().toLowerCase()
-
-        const positive = ['yes', 'i am', 'authorized', 'authorised', 'do have', 'willing', 'able to']
-        const negative = ['no', 'not ', 'do not', "don't", 'unable', 'require sponsorship']
-
-        const match = group.find(r => {
-          const l = labelOf(r)
-          if (!l) return false
-          if (want === 'yes') return l.startsWith('yes') || positive.some(p => l.includes(p))
-          if (want === 'no') return l.startsWith('no') || negative.some(n => l.includes(n))
-          // If caller passed a literal option text, try to match it directly.
-          return l.includes(want)
-        })
-
-        if (match) { match.click(); return true }
-        return false
-      }, { sel: selector, want })
-    } catch {
-      return false
-    }
-  }
-
-  /**
-   * Selects a dropdown option by best-effort intent match against the real
-   * option list. Never picks an arbitrary index. Returns false if nothing
-   * reasonable matched.
-   */
-  private async _selectOptionByIntent(page: Page, selector: string, wanted: string, options: string[]): Promise<boolean> {
-    const w = String(wanted || '').trim().toLowerCase()
-    if (!w) return false
-    try {
-      const el = await page.$(selector)
-      if (!el) return false
-
-      const exact = options.find(o => o.trim().toLowerCase() === w)
-      const partial = exact || options.find(o => {
-        const opt = o.trim().toLowerCase()
-        return opt.includes(w) || w.includes(opt)
-      })
-      if (!partial) return false
-
-      try { await el.selectOption({ label: partial }) }
-      catch { await el.selectOption({ value: partial }) }
-
-      const now = await el.evaluate((n: any) =>
-        (n as HTMLSelectElement).value || (n as HTMLSelectElement).selectedOptions?.[0]?.text || '')
-      return !!now
-    } catch {
-      return false
-    }
-  }
-
-  /**
-   * Types a value into a text-like field and reads it back to confirm it
-   * landed. One retry, then gives up (returns false) rather than leaving a
-   * half-filled or wrong field.
-   */
-  private async _fillAndVerify(page: Page, selector: string, value: string): Promise<boolean> {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        if (page.isClosed()) return false
-        const el = await page.$(selector)
-        if (!el || !(await el.isVisible())) return false
-
-        await el.click()
-        await el.fill('') // clear
-        await this._typeHumanEl(el, value)
-        await this._delay(150, 300)
-
-        const got = await el.evaluate((n: any) => (n as HTMLInputElement).value || '')
-        if (got.trim() === value.trim()) return true
-        // else loop and retry once
-      } catch {
-        // fall through to retry / fail
-      }
-    }
-    return false
-  }
-
-  /** Cheap type sanity check so a number field never gets prose, etc. */
-  private _answerFitsType(field: { type: string; label: string }, ans: string): boolean {
-    const t = field.type
-    if (t === 'email') return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ans)
-    if (t === 'tel') return /\d/.test(ans) && ans.length <= 20
-    const numish = /(year|experience|salary|how many|number of|notice)/.test(field.label.toLowerCase())
-    if (numish && !/\d/.test(ans)) return false
-    if (t !== 'textarea' && ans.length > 120) return false
-    return true
-  }
-
-  /** Builds the strict, per-field Groq prompt. */
-  private _buildFillPrompt(
-    profile: any,
-    fields: Array<{ id: string | null; label: string; type: string; required: boolean; options?: string[] }>
-  ): string {
-    const candidate = {
-      name: profile.name,
-      city: profile.city,
-      phone: profile.phone,
-      email: profile.email,
-      linkedin_url: profile.linkedin_url,
-      website: profile.website,
-      years_of_experience: profile.years_of_experience,
-      expected_salary: profile.expected_salary,
-      notice_period: profile.notice_period,
-      work_authorized: profile.work_authorized,
-      requires_visa_sponsorship: profile.requires_visa_sponsorship,
-      willing_to_relocate: profile.willing_to_relocate,
-      skills: profile.skills,
-      experience_summary: profile.experience_summary,
-      resume_text: (profile.resume_text || '').slice(0, 2000),
-    }
-
-    return `You fill one candidate's job application fields. Answer ONLY from the profile below.
-
-HARD RULES:
-- Answer each field INDEPENDENTLY. Never copy an answer from one field into another.
-- If the profile does not clearly contain the answer, return "" for that field. Do NOT guess names, employers, dates, salaries, locations, or eligibility.
-- Keep every answer as SHORT as validly possible. A number field gets only the number. A location field gets only a place name. A yes/no field gets exactly "Yes" or "No".
-- For a dropdown, you MUST return one value copied EXACTLY from that field's "options" list, or "" if none fit.
-- For a cover-letter / "why" field, write at most 3 plain sentences grounded only in the profile. No em dashes.
-- Return ONLY a JSON object mapping each field "id" to its answer string.
-- Use ONLY the ids provided. Do NOT add, rename, or invent ids. Do NOT include commentary.
-
-CANDIDATE PROFILE:
-${JSON.stringify(candidate)}
-
-FIELDS (answer each by matching its label to the profile; respect its type and options):
-${JSON.stringify(fields, null, 2)}
-
-Return example: { "#q1": "3", "#loc": "${profile.city || ''}", "#auth": "Yes" }`
-  }
 
   // ─────────────────────────────────────────────────────────────────
   // Session Management
@@ -1044,8 +974,9 @@ Return example: { "#q1": "3", "#loc": "${profile.city || ''}", "#auth": "Yes" }`
     if (!this.context) {
       try {
         const cfg = validateConfig()
+        const userProfileDir = this._getUserProfileDir(userId, portal)
         this.context = await chromium.launchPersistentContext(
-          cfg.chromeProfilePath,
+          userProfileDir,
           {
             headless: false,
             executablePath: cfg.chromeExecutablePath,
@@ -1163,10 +1094,27 @@ Return example: { "#q1": "3", "#loc": "${profile.city || ''}", "#auth": "Yes" }`
   private async _findResumeFile(userId: string): Promise<string | null> {
     // 1. Try Supabase Storage first (the primary upload path from the UI)
     try {
+      const { data: profileRow } = await this.supabase
+        .from('profiles')
+        .select('profile_data')
+        .eq('user_id', userId)
+        .maybeSingle()
+
+      const pData = profileRow?.profile_data || {}
+      const candidateName = pData.name ? String(pData.name).trim().replace(/[^a-zA-Z0-9]+/g, '_') : ''
+
+      let cleanFileName = 'CV.pdf'
+      if (candidateName) {
+        cleanFileName = `${candidateName}_CV.pdf`
+      } else if (pData.resume_filename) {
+        const orig = String(pData.resume_filename).replace(/[^a-zA-Z0-9._-]+/g, '_')
+        cleanFileName = orig.toLowerCase().endsWith('.pdf') ? orig : `${orig}.pdf`
+      }
+
       const storagePath = `${userId}/resume.pdf`
-      const tmpDir = path.join(os.tmpdir(), 'jobnavi-resumes')
-      fs.mkdirSync(tmpDir, { recursive: true })
-      const localPath = path.join(tmpDir, `${userId}_resume.pdf`)
+      const userTmpDir = path.join(os.tmpdir(), 'jobnavi-resumes', `user_${userId}`)
+      fs.mkdirSync(userTmpDir, { recursive: true })
+      const localPath = path.join(userTmpDir, cleanFileName)
 
       if (fs.existsSync(localPath)) {
         console.log(`[Automation] Resume found in local cache: ${localPath}`)
@@ -1180,7 +1128,7 @@ Return example: { "#q1": "3", "#loc": "${profile.city || ''}", "#auth": "Yes" }`
       if (!error && fileData) {
         const arrayBuffer = await fileData.arrayBuffer()
         fs.writeFileSync(localPath, Buffer.from(arrayBuffer))
-        console.log(`[Automation] ✅ Resume downloaded from Supabase Storage → ${localPath}`)
+        console.log(`[Automation] ✅ Resume downloaded from Supabase Storage as clean PDF → ${localPath}`)
         return localPath
       }
     } catch (storageErr: any) {

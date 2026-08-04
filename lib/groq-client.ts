@@ -1,179 +1,155 @@
-import { Groq } from 'groq-sdk/client.js'
+// ─────────────────────────────────────────────────────────────────────────────
+// lib/groq-client.ts
+// LangChain-powered Groq Client with Zod Structured Output & Fallback Chains.
+// ─────────────────────────────────────────────────────────────────────────────
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Free-tier Groq models (as of 2025)
-// Ordered by preference: fastest/best first, fallbacks after.
-// Rate limits per model: https://console.groq.com/docs/rate-limits
-// ─────────────────────────────────────────────────────────────────────────────
+import { ChatGroq } from '@langchain/groq'
+import { ChatPromptTemplate } from '@langchain/core/prompts'
+import { z } from 'zod'
+
 export const GROQ_FREE_MODELS = [
   {
-    id: 'llama-3.3-70b-versatile',
-    description: 'Flagship 70B model, best quality reasoning',
-    req_per_min: 30,
-    tokens_per_min: 6_000,
-    tokens_per_day: 100_000,
-  },
-  {
     id: 'llama-3.1-8b-instant',
-    description: 'Ultra-fast 8B model',
-    req_per_min: 30,
-    tokens_per_min: 20_000,
-    tokens_per_day: 500_000,
+    description: 'Active base model',
   },
   {
-    id: 'mixtral-8x7b-32768',
-    description: 'Mixture of Experts fallback',
-    req_per_min: 30,
-    tokens_per_min: 5_000,
-    tokens_per_day: 500_000,
+    id: 'openai/gpt-oss-20b',
+    description: 'Recommended fast replacement model',
+  },
+  {
+    id: 'openai/gpt-oss-120b',
+    description: 'Heavy reasoning model',
+  },
+  {
+    id: 'qwen/qwen3.6-27b',
+    description: 'High-performance alternative',
   },
 ] as const
 
 export type GroqModelId = (typeof GROQ_FREE_MODELS)[number]['id']
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Balanced prompt character limits
-// ~4 chars per token on average. We target 1200–1500 tokens of prompt input,
-// leaving 500–800 tokens for the model's JSON output response.
-// Total context budget per call: ~2000 tokens = ~8000 characters of prompt.
-// ─────────────────────────────────────────────────────────────────────────────
 export const PROMPT_CHAR_LIMITS = {
-  visible_text: 800,    // ~200 tokens
-  form_fields:  2000,   // ~500 tokens — most important
-  buttons:      600,    // ~150 tokens
-  html_snippet: 1200,   // ~300 tokens (fallback raw HTML if structured empty)
+  visible_text: 800,
+  form_fields: 2000,
+  buttons: 600,
+  html_snippet: 1200,
   max_response_tokens: 600,
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Rotating Groq Client
-// Automatically cycles through free models when quota/rate limits are hit.
-// ─────────────────────────────────────────────────────────────────────────────
 export class GroqRotatingClient {
-  private groq: Groq
+  private apiKey: string
+  private primaryModel: ChatGroq
+  private fallbackChain: any
   private modelIndex = 0
-  private exhaustedModels = new Set<string>()
 
   constructor(apiKey: string) {
-    this.groq = new Groq({ apiKey })
+    this.apiKey = apiKey
+
+    // Primary ChatGroq instance
+    this.primaryModel = new ChatGroq({
+      model: GROQ_FREE_MODELS[0].id,
+      apiKey,
+      temperature: 0,
+    })
+
+    // Fallback ChatGroq instances
+    const fallbackModels = GROQ_FREE_MODELS.slice(1).map(m => new ChatGroq({
+      model: m.id,
+      apiKey,
+      temperature: 0,
+    }))
+
+    // Chain primary model with fallbacks
+    this.fallbackChain = this.primaryModel.withFallbacks(fallbackModels)
   }
 
   get currentModel(): string {
     return GROQ_FREE_MODELS[this.modelIndex].id
   }
 
-  private _advance(): boolean {
-    this.exhaustedModels.add(this.currentModel)
-    // Find next non-exhausted model
-    for (let i = 0; i < GROQ_FREE_MODELS.length; i++) {
-      const next = (this.modelIndex + 1 + i) % GROQ_FREE_MODELS.length
-      if (!this.exhaustedModels.has(GROQ_FREE_MODELS[next].id)) {
-        this.modelIndex = next
-        console.log(`[GroqClient] 🔄 Switched to model: ${this.currentModel}`)
-        return true
-      }
-    }
-    // All models exhausted — reset and start over after a pause
-    console.warn(`[GroqClient] ⚠️ All models quota-exhausted. Resetting rotation.`)
-    this.exhaustedModels.clear()
-    this.modelIndex = 0
-    return false
-  }
-
   /**
-   * Send a chat completion with automatic model rotation on quota errors.
-   * Retries up to `maxRetries` times across different models.
+   * LangChain Structured Output execution with Zod schema validation & model fallbacks.
    */
-  async chat(
-    prompt: string,
-    options: {
-      max_tokens?: number
-      temperature?: number
-      json?: boolean
-      maxRetries?: number
-    } = {}
-  ): Promise<string> {
-    const {
-      max_tokens = PROMPT_CHAR_LIMITS.max_response_tokens,
-      temperature = 0,
-      json = true,
-      maxRetries = GROQ_FREE_MODELS.length,
-    } = options
+  async chatStructured<T>(
+    messages: Array<[string, string]>,
+    schema: z.ZodType<T>
+  ): Promise<T> {
+    const formattedMessages = messages.map(([role, content]) => ({
+      role: role === 'human' ? 'user' : role,
+      content,
+    }))
 
-    let attempts = 0
-    let finalPrompt = prompt
-    if (json && !finalPrompt.toLowerCase().includes('json')) {
-      finalPrompt = `${prompt}\n\nPlease respond strictly in JSON format.`
-    }
+    // Apply withStructuredOutput to primary model & all fallback models
+    const primaryStructured = this.primaryModel.withStructuredOutput(schema)
+    const fallbackStructured = GROQ_FREE_MODELS.slice(1).map(m =>
+      new ChatGroq({
+        model: m.id,
+        apiKey: this.apiKey,
+        temperature: 0,
+      }).withStructuredOutput(schema)
+    )
 
-    while (attempts < maxRetries) {
+    const structuredChain = primaryStructured.withFallbacks(fallbackStructured)
+
+    for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const response = await this.groq.chat.completions.create({
-          model: this.currentModel,
-          temperature,
-          max_tokens,
-          messages: [{ role: 'user', content: finalPrompt }],
-          ...(json ? { response_format: { type: 'json_object' } } : {}),
-        })
-
-        const content = response.choices[0]?.message?.content || ''
-        return content
-
+        const result = await structuredChain.invoke(formattedMessages)
+        return result as T
       } catch (error: any) {
-        const msg: string = error?.message || ''
-        // Groq SDK throws errors like "429 {\"error\":{...}}" where status is in the message
-        const statusFromMsg = parseInt(msg.split(' ')[0], 10)
-        const status: number = error?.status ?? error?.response?.status ?? (isNaN(statusFromMsg) ? 0 : statusFromMsg)
+        const msg = String(error?.message || error)
+        const isRateLimit = msg.includes('429') || msg.includes('rate limit') || msg.includes('rate_limit')
 
-        const isQuota = status === 429 ||
-          msg.includes('rate_limit_exceeded') ||
-          msg.includes('rate limit') ||
-          msg.includes('tokens per day') ||
-          msg.includes('tokens per minute')
-
-        const isTokenError = msg.includes('json_validate_failed') ||
-                             msg.includes('max completion tokens')
-
-        if (isQuota) {
-          console.warn(`[GroqClient] 429 quota hit on ${this.currentModel}. Rotating...`)
-          const switched = this._advance()
-          if (!switched) {
-            console.warn(`[GroqClient] All models rate-limited. Waiting 60s...`)
-            await new Promise(r => setTimeout(r, 60_000))
-          }
-          attempts++
+        if (isRateLimit) {
+          console.log(`[LangChainGroq] ⚠️ Rate limit hit. Cooling down for 60 seconds (Attempt ${attempt + 1}/3)...`)
+          await new Promise(r => setTimeout(r, 60000))
           continue
         }
 
-        if (isTokenError) {
-          console.warn(`[GroqClient] Token/JSON error on ${this.currentModel}. Rotating...`)
-          this._advance()
-          attempts++
+        if (attempt < 2) {
+          console.warn(`[LangChainGroq] 🔄 Chain retrying due to trace error: ${msg.slice(0, 80)}`)
+          await new Promise(r => setTimeout(r, 2000))
           continue
         }
 
-        // Non-quota error — rethrow immediately
         throw error
       }
     }
 
-    throw new Error(`[GroqClient] All ${maxRetries} model rotation attempts failed.`)
+    throw new Error('[LangChainGroq] All LangChain fallback execution attempts failed.')
   }
 
   /**
-   * Convenience: parse JSON from the model response.
+   * Compatibility wrapper: executes JSON completion via LangChain.
    */
-  async chatJSON<T = Record<string, any>>(
-    prompt: string,
-    options: Parameters<typeof this.chat>[1] = {}
-  ): Promise<T> {
-    const raw = await this.chat(prompt, { ...options, json: true })
-    try {
-      return JSON.parse(raw) as T
-    } catch {
-      // Strip markdown fences if present
-      const cleaned = raw.replace(/```json\n?|```/g, '').trim()
-      return JSON.parse(cleaned) as T
+  async chatJSON<T = Record<string, any>>(prompt: string): Promise<T> {
+    const GenericJsonSchema = z.record(z.string(), z.any())
+    return await this.chatStructured<T>(
+      [
+        ['system', 'You are a precise JSON assistant. Respond strictly in valid JSON matching the user prompt requirements.'],
+        ['human', prompt],
+      ],
+      GenericJsonSchema as unknown as z.ZodType<T>
+    )
+  }
+
+  /**
+   * Standard plain text chat via LangChain fallback chain.
+   */
+  async chat(prompt: string): Promise<string> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await this.fallbackChain.invoke([['user', prompt]])
+        return res.content || String(res)
+      } catch (error: any) {
+        const msg = String(error?.message || error)
+        if (msg.includes('429') || msg.includes('rate limit')) {
+          console.log(`[LangChainGroq] ⚠️ Rate limit hit. Cooling down for 60 seconds...`)
+          await new Promise(r => setTimeout(r, 60000))
+          continue
+        }
+        throw error
+      }
     }
+    throw new Error('[LangChainGroq] Chat execution failed.')
   }
 }

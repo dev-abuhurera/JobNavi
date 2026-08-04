@@ -93,3 +93,51 @@ export function classifyApplicationType(
   if (lower.includes('linkedin.com')) return 'linkedin_easy_apply'
   return 'manual'
 }
+
+/**
+ * Checks if snippet or title indicates the job was posted/reposted within the last 24 hours.
+ * Rejects any listings explicitly indicating they are 2+ days old, or weeks/months/years old.
+ */
+export function isPostedWithin24Hours(snippet: string = '', title: string = ''): boolean {
+  const combined = `${title} ${snippet}`.toLowerCase()
+
+  // Match expressions like "3 days ago", "4 days ago", "1 week ago", "2 weeks ago", "1 month ago" (Allows up to 2 days ago)
+  const oldDatePatterns = [
+    /\b([3-9]|[1-9]\d+)\s+days?\s+ago\b/i,
+    /\b\d+\s+(weeks?|months?|years?)\s+ago\b/i,
+    /reposted\s+([3-9]|[1-9]\d+)\s+days?\s+ago/i,
+    /reposted\s+\d+\s+(weeks?|months?|years?)\s+ago/i,
+    /posted\s+([3-9]|[1-9]\d+)\s+days?\s+ago/i,
+    /posted\s+\d+\s+(weeks?|months?|years?)\s+ago/i,
+    /1 week ago/i,
+    /2 weeks ago/i,
+    /3 weeks ago/i,
+    /1 month ago/i,
+  ]
+
+  if (oldDatePatterns.some(pattern => pattern.test(combined))) {
+    return false
+  }
+
+  return true
+}
+
+/**
+ * Checks if a snippet or title indicates an external apply mechanism (responses managed off linkedin, external site).
+ */
+export function isLikelyEasyApply(snippet: string = '', title: string = ''): boolean {
+  const combined = `${title} ${snippet}`.toLowerCase()
+
+  const externalPatterns = [
+    'responses managed off linkedin',
+    'apply on company website',
+    'apply on employer site',
+    'apply on company site',
+    'external apply',
+    'apply directly on',
+    'off linkedin',
+  ]
+
+  return !externalPatterns.some(p => combined.includes(p))
+}
+

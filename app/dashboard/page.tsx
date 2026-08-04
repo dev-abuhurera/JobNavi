@@ -1,6 +1,6 @@
 import { createClient } from '@/lib/supabase/server'
 import { getJobs, getApplications } from '@/lib/supabase/db'
-import { ArrowRight, Send, Briefcase, CheckCircle2, Target, Layers, Compass, Building2 } from 'lucide-react'
+import { ArrowRight, Send, Briefcase, CheckCircle2, Target, Layers, Compass, Building2, Activity } from 'lucide-react'
 
 export default async function DashboardPage() {
   const supabase = createClient()
@@ -62,12 +62,20 @@ export default async function DashboardPage() {
           <p className="text-slate-500 text-xs mt-0.5">Live overview of your job discovery and application pipeline.</p>
         </div>
 
-        <a
-          href="/dashboard/discovery"
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-sm shadow-emerald-600/20 transition-all active:scale-95 w-fit"
-        >
-          <Compass size={15} /> Start Discovery Search
-        </a>
+        <div className="flex items-center gap-2">
+          <a
+            href="/dashboard/logs"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-700 hover:text-slate-900 bg-white/80 hover:bg-white border border-slate-200/80 shadow-2xs transition-all active:scale-95"
+          >
+            <Activity size={15} className="text-emerald-600" /> Session Logs
+          </a>
+          <a
+            href="/dashboard/discovery"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-sm shadow-emerald-600/20 transition-all active:scale-95"
+          >
+            <Compass size={15} /> Start Discovery Search
+          </a>
+        </div>
       </header>
 
       {/* 4 Compact Telemetry Stat Cards */}

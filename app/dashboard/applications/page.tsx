@@ -18,14 +18,37 @@ export default function ApplicationsPage() {
     setLoading(false)
   }, [supabase])
 
-  useEffect(() => { fetchApps() }, [fetchApps])
+  useEffect(() => {
+    let channel: any = null
+    fetchApps()
+    window.addEventListener('focus', fetchApps)
 
-  const handleDelete = async (id: number) => {
-    if (!window.confirm('Delete this application record?')) return
+    supabase.auth.getUser().then(({ data }) => {
+      const uid = data.user?.id
+      if (!uid) return
+      const ch = supabase.channel(`apps-${uid}-${Math.random().toString(36).substring(2, 6)}`)
+      ch.on('postgres_changes',
+        { event: '*', schema: 'public', table: 'applications', filter: `user_id=eq.${uid}` },
+        () => fetchApps()
+      )
+      ch.subscribe()
+      channel = ch
+    })
+
+    return () => {
+      window.removeEventListener('focus', fetchApps)
+      if (channel) supabase.removeChannel(channel)
+    }
+  }, [fetchApps, supabase])
+
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+
+  const confirmDelete = async (id: number) => {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     const { error } = await supabase.from('applications').delete().eq('id', id).eq('user_id', user.id)
-    if (!error) setApps(apps.filter(a => a.id !== id))
+    if (!error) setApps(prev => prev.filter(a => a.id !== id))
+    setDeletingId(null)
   }
 
   const filtered = apps.filter(a =>
@@ -129,9 +152,42 @@ export default function ApplicationsPage() {
 
                     {/* Status */}
                     <td className="px-6 py-4">
-                      <span className="inline-flex items-center gap-1 font-mono px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-700 border border-emerald-200 text-[10px] font-bold uppercase tracking-wider">
-                        <CheckCircle2 size={12} /> {app.current_status}
-                      </span>
+                      {(() => {
+                        const st = (app.current_status || 'pending').toLowerCase()
+                        if (st === 'applied') {
+                          return (
+                            <span className="inline-flex items-center gap-1 font-mono px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-700 border border-emerald-200 text-[10px] font-bold uppercase tracking-wider">
+                              <CheckCircle2 size={12} className="text-emerald-600" /> Applied
+                            </span>
+                          )
+                        }
+                        if (st === 'processing' || st === 'applying') {
+                          return (
+                            <span className="inline-flex items-center gap-1 font-mono px-2.5 py-1 rounded-full bg-amber-500/10 text-amber-700 border border-amber-200 text-[10px] font-bold uppercase tracking-wider animate-pulse">
+                              <Sparkles size={12} className="text-amber-600" /> Applying...
+                            </span>
+                          )
+                        }
+                        if (st === 'failed' || st === 'closed') {
+                          return (
+                            <span className="inline-flex items-center gap-1 font-mono px-2.5 py-1 rounded-full bg-rose-500/10 text-rose-700 border border-rose-200 text-[10px] font-bold uppercase tracking-wider">
+                              {st === 'closed' ? 'Closed' : 'Failed'}
+                            </span>
+                          )
+                        }
+                        if (st === 'skipped') {
+                          return (
+                            <span className="inline-flex items-center gap-1 font-mono px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 border border-slate-200 text-[10px] font-bold uppercase tracking-wider">
+                              Skipped
+                            </span>
+                          )
+                        }
+                        return (
+                          <span className="inline-flex items-center gap-1 font-mono px-2.5 py-1 rounded-full bg-sky-500/10 text-sky-700 border border-sky-200 text-[10px] font-bold uppercase tracking-wider">
+                            Pending
+                          </span>
+                        )
+                      })()}
                     </td>
 
                     {/* Date */}
@@ -157,7 +213,7 @@ export default function ApplicationsPage() {
                           </a>
                         )}
                         <button
-                          onClick={() => handleDelete(app.id)}
+                          onClick={() => setDeletingId(app.id)}
                           title="Delete Record"
                           className="p-2 rounded-xl text-slate-500 hover:text-rose-600 hover:bg-rose-50 transition-all"
                         >
@@ -172,6 +228,35 @@ export default function ApplicationsPage() {
           </table>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {deletingId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white border border-slate-200 rounded-3xl p-6 max-w-sm w-full shadow-2xl space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center">
+              <Trash2 size={24} />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Delete Application</h3>
+              <p className="text-sm text-slate-500 mt-1">Are you sure you want to delete this application record? This action cannot be undone.</p>
+            </div>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                onClick={() => setDeletingId(null)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => confirmDelete(deletingId)}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-sm font-semibold text-white transition-all shadow-md shadow-rose-600/20"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

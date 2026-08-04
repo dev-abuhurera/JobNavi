@@ -1,10 +1,26 @@
+// ─────────────────────────────────────────────────────────────────
+// lib/utils/matching.ts
+// Semantic Vector Filtering & Profile Text Normalisation Layer.
+// Converts unstructured data parameters into strict evaluation profiles.
+// ─────────────────────────────────────────────────────────────────
+
 import { getSimilarity } from './embeddings'
- 
+
 export interface UserProfile {
   userId?: string
   name?: string
   email?: string
   phone?: string
+  city?: string
+  linkedin_url?: string
+  website?: string
+  years_of_experience?: string | number
+  expected_salary?: string
+  current_salary?: string
+  notice_period?: string
+  work_authorized?: boolean | string
+  requires_visa_sponsorship?: boolean | string
+  willing_to_relocate?: boolean | string
   resume_text?: string
   dense_summary?: string
   skills?: string[]
@@ -12,7 +28,7 @@ export interface UserProfile {
   desired_roles?: string[]
   preferred_tech?: string[]
 }
- 
+
 /**
  * Converts a user profile into a dense semantic text representation for embedding.
  * Uses semantically compressed profile summary for high signal & low memory footprint.
@@ -46,15 +62,15 @@ export function profileToSearchText(profile: UserProfile): string {
 
   return parts.filter(p => p && p.trim()).join('. ').slice(0, 1000)
 }
- 
+
 /**
  * Converts a job into semantic text for matching.
  */
 export function jobToMatchText(job: any): string {
-  return `${job.title} ${job.description || ''}`
-    .slice(0, 1500);
+  return `${job.title || ''} ${job.description || ''}`
+    .slice(0, 1500)
 }
- 
+
 /**
  * Calculates semantic similarity between a user profile and a job.
  */
@@ -63,15 +79,15 @@ export async function matchProfileToJob(
   job: any
 ): Promise<number> {
   try {
-    const jobText = jobToMatchText(job);
-    const similarity = await getSimilarity(profileText, jobText);
-    return similarity;
+    const jobText = jobToMatchText(job)
+    const similarity = await getSimilarity(profileText, jobText)
+    return similarity
   } catch (error) {
-    console.error('[Matching] Profile-to-job similarity calculation failed:', error);
-    return 0;
+    console.error('[Matching] Profile-to-job similarity calculation failed:', error)
+    return 0
   }
 }
- 
+
 /**
  * Filters jobs based on:
  * 1. Hard rejections (negative keywords in title)
@@ -86,34 +102,34 @@ export async function filterJobsByProfile(
     'customer support', 'tech support', 'customer service'
   ]
 ): Promise<any[]> {
-  const SIMILARITY_THRESHOLD = 0.25;
-  const filtered: any[] = [];
- 
+  const SIMILARITY_THRESHOLD = 0.25
+  const filtered: any[] = []
+
   for (const job of jobs) {
-    const titleLower = (job.title || '').toLowerCase();
- 
+    const titleLower = (job.title || '').toLowerCase()
+
     // Step 1: Hard reject if negative keyword in title
     if (negativeKeywords.some(k => titleLower.includes(k))) {
-      console.log(`[Match] Rejected "${job.title}" — matches negative keyword`);
-      continue;
+      console.log(`[Match] Rejected "${job.title}" — matches negative keyword`)
+      continue
     }
- 
+
     // Step 2: Vector similarity to profile
-    const similarity = await matchProfileToJob(profileText, job);
+    const similarity = await matchProfileToJob(profileText, job)
     if (similarity > SIMILARITY_THRESHOLD) {
       filtered.push({
         ...job,
         similarity,
         fit_score: Math.round(similarity * 100)
-      });
+      })
     } else {
-      console.log(`[Match] Rejected "${job.title}" — low similarity (${similarity.toFixed(2)})`);
+      console.log(`[Match] Rejected "${job.title}" — low similarity (${similarity.toFixed(2)})`)
     }
   }
- 
-  return filtered.sort((a, b) => (b.similarity || 0) - (a.similarity || 0));
+
+  return filtered.sort((a, b) => (b.similarity || 0) - (a.similarity || 0))
 }
- 
+
 /**
  * Batch filter multiple jobs with profile caching.
  */
@@ -122,8 +138,8 @@ export async function batchFilterJobsByProfile(
   profile: UserProfile,
   negativeKeywords?: string[]
 ): Promise<any[]> {
-  const profileText = profileToSearchText(profile);
-  console.log(`[Match] Filtering ${jobs.length} jobs against profile: "${profileText.slice(0, 60)}..."`);
+  const profileText = profileToSearchText(profile)
+  console.log(`[Match] Filtering ${jobs.length} jobs against profile: "${profileText.slice(0, 60)}..."`)
   
-  return filterJobsByProfile(jobs, profileText, negativeKeywords);
+  return filterJobsByProfile(jobs, profileText, negativeKeywords)
 }

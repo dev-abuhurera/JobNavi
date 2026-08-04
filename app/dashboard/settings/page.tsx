@@ -22,12 +22,27 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [sessions, setSessions] = useState<Record<string, SessionStatus>>({})
   const [portalLoading, setPortalLoading] = useState<Record<string, boolean>>({})
+  const [savingLinks, setSavingLinks] = useState(false)
+  const [profileData, setProfileData] = useState<{ portfolio_url: string; github_url: string }>({
+    portfolio_url: '',
+    github_url: '',
+  })
   const [toast, setToast] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null)
   const supabase = createClient()
 
   const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ text, type }); setTimeout(() => setToast(null), 3000)
   }
+
+  const fetchProfile = useCallback(async (uid: string) => {
+    const { data } = await supabase.from('profiles').select('*').eq('user_id', uid).maybeSingle()
+    if (data?.profile_data) {
+      setProfileData({
+        portfolio_url: data.profile_data.portfolio_url || data.profile_data.portfolio || data.profile_data.website || '',
+        github_url: data.profile_data.github_url || data.profile_data.github || '',
+      })
+    }
+  }, [supabase])
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -38,12 +53,41 @@ export default function SettingsPage() {
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
-      if (data.user) { setUserId(data.user.id); refreshStatus() }
+      if (data.user) {
+        setUserId(data.user.id)
+        refreshStatus()
+        fetchProfile(data.user.id)
+      }
       setLoading(false)
     })
     const interval = setInterval(refreshStatus, 4000)
     return () => clearInterval(interval)
-  }, [refreshStatus, supabase.auth])
+  }, [fetchProfile, refreshStatus, supabase.auth])
+
+  const saveLinks = async () => {
+    if (!userId) return
+
+    setSavingLinks(true)
+    const { data: existing } = await supabase.from('profiles').select('profile_data').eq('user_id', userId).maybeSingle()
+    const mergedData = {
+      ...(existing?.profile_data || {}),
+      portfolio_url: profileData.portfolio_url.trim(),
+      github_url: profileData.github_url.trim(),
+      website: profileData.portfolio_url.trim() || profileData.github_url.trim(),
+    }
+
+    const { error } = await supabase.from('profiles').upsert(
+      { user_id: userId, profile_data: mergedData },
+      { onConflict: 'user_id' }
+    )
+
+    setSavingLinks(false)
+    if (error) {
+      showToast(`Save failed: ${error.message}`, 'error')
+    } else {
+      showToast('Profile links saved successfully!', 'success')
+    }
+  }
 
   const connect = async (portalId: string) => {
     setPortalLoading(s => ({ ...s, [portalId]: true }))
@@ -60,9 +104,17 @@ export default function SettingsPage() {
     setPortalLoading(s => ({ ...s, [portalId]: true }))
     try {
       const res = await fetch('/api/portal/disconnect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ portal: portalId }) })
-      if (res.ok) { showToast('Portal session disconnected', 'success'); setSessions(s => ({ ...s, [portalId]: null })) }
-      else showToast('Failed to disconnect portal', 'error')
-    } catch { showToast('Disconnect failed', 'error') }
+      const d = await res.json().catch(() => ({}))
+      if (res.ok) {
+        showToast(d.message || 'Portal session disconnected', 'success')
+        setSessions(s => ({ ...s, [portalId]: null }))
+        await refreshStatus()
+      } else {
+        showToast(d.error || 'Failed to disconnect portal', 'error')
+      }
+    } catch {
+      showToast('Disconnect failed', 'error')
+    }
     setPortalLoading(s => ({ ...s, [portalId]: false }))
   }
 
@@ -101,7 +153,7 @@ export default function SettingsPage() {
             <div className="flex items-center gap-2.5">
               <h1 className="font-display text-3xl font-bold tracking-tight text-slate-900">Settings</h1>
               <span className="font-mono text-xs font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-700 border border-emerald-200">
-                Portal Integrations
+                Portals & Links
               </span>
             </div>
           </div>
@@ -110,27 +162,71 @@ export default function SettingsPage() {
 
       {/* Main Settings Glass Box */}
       <div className="bg-white/70 backdrop-blur-3xl border border-white/90 rounded-3xl p-6 sm:p-8 shadow-[0_20px_50px_rgba(0,0,0,0.04)] space-y-8">
+        
+        {/* Section 1: Candidate Profile Links */}
         <div>
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2.5">
               <Link2 size={20} className="text-emerald-600" />
-              <h3 className="font-display font-bold text-xl text-slate-900">Connected Portals</h3>
+              <h3 className="font-display font-bold text-xl text-slate-900">Profile & Portfolio Links</h3>
             </div>
             <ShieldCheck size={20} className="text-emerald-600" />
           </div>
           <p className="text-xs text-slate-500 mt-1 font-medium">
-            Authenticate your portals below to enable automated background job applications.
+            Manage your professional links below. These are automatically attached when auto-filling job application forms.
           </p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-5">
+            {/* Portfolio URL Input */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
+                <span>Portfolio Website URL</span>
+                <span className="text-[10px] font-mono font-bold text-slate-400 uppercase">Optional</span>
+              </label>
+              <input
+                type="text"
+                value={profileData.portfolio_url}
+                onChange={e => setProfileData(p => ({ ...p, portfolio_url: e.target.value }))}
+                placeholder="https://yourportfolio.com"
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+              />
+            </div>
+
+            {/* GitHub URL Input */}
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700 flex items-center justify-between">
+                <span>GitHub Profile URL</span>
+                <span className="text-[10px] font-mono font-bold text-slate-400 uppercase">Optional</span>
+              </label>
+              <input
+                type="text"
+                value={profileData.github_url}
+                onChange={e => setProfileData(p => ({ ...p, github_url: e.target.value }))}
+                placeholder="https://github.com/yourusername"
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-200 bg-white text-xs font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+              />
+            </div>
+          </div>
+
+          <div className="mt-4 flex justify-end">
+            <button
+              onClick={saveLinks}
+              disabled={savingLinks}
+              className="py-2.5 px-6 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 transition-all shadow-md shadow-emerald-600/20 active:scale-95 flex items-center gap-2 disabled:opacity-50"
+            >
+              {savingLinks ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle2 size={14} />}
+              <span>Save Profile Links</span>
+            </button>
+          </div>
         </div>
 
-        {/* Section 1: Available Portals */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between text-[11px] font-mono font-bold uppercase tracking-wider text-slate-400">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500" />
-              <span>Available Portals</span>
+        {/* Section 2: Connected Portals */}
+        <div className="space-y-4 pt-4 border-t border-slate-200/60">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2.5">
+              <Link2 size={20} className="text-emerald-600" />
+              <h3 className="font-display font-bold text-xl text-slate-900 font-display font-bold">Connected Portals</h3>
             </div>
-            <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200/60 text-slate-500">1 Available</span>
           </div>
 
           {loading ? (
@@ -190,7 +286,7 @@ export default function SettingsPage() {
           )}
         </div>
 
-        {/* Section 2: Coming Soon Portals */}
+        {/* Section 3: Coming Soon Portals */}
         <div className="space-y-4 pt-4 border-t border-slate-200/60">
           <div className="flex items-center justify-between text-[11px] font-mono font-bold uppercase tracking-wider text-slate-400">
             <div className="flex items-center gap-2">
@@ -227,9 +323,9 @@ export default function SettingsPage() {
 
       {/* Floating Glass Toast Notification */}
       {toast && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900/90 text-white backdrop-blur-2xl border border-white/20 px-5 py-3.5 rounded-2xl shadow-2xl font-medium text-xs flex items-center gap-2.5 animate-bounce">
-          {toast.type === 'success' ? <CheckCircle2 size={16} className="text-emerald-400" /> : toast.type === 'error' ? <XCircle size={16} className="text-rose-400" /> : <Loader2 size={16} className="animate-spin text-amber-400" />}
-          <span>{toast.text}</span>
+        <div className="fixed bottom-6 right-6 z-50 bg-white/95 text-black border border-slate-300/80 backdrop-blur-2xl px-5 py-3.5 rounded-2xl shadow-2xl font-bold text-xs flex items-center gap-2.5 animate-bounce">
+          {toast.type === 'success' ? <CheckCircle2 size={16} className="text-emerald-600" /> : toast.type === 'error' ? <XCircle size={16} className="text-rose-600" /> : <Loader2 size={16} className="animate-spin text-amber-600" />}
+          <span className="text-black font-bold">{toast.text}</span>
         </div>
       )}
     </div>

@@ -82,12 +82,17 @@ export default function ApprovalsPage() {
     showToast('Job queued for automated application!')
   }
 
-  const handleDelete = async (id: string | number) => {
-    if (!window.confirm('Delete this job discovery record?')) return
+  const [deletingId, setDeletingId] = useState<string | number | null>(null)
+
+  const confirmDelete = async (id: string | number) => {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     const { error } = await supabase.from('jobs').delete().eq('id', id).eq('user_id', user.id)
-    if (!error) setJobs(prev => prev.filter(j => j.id !== id))
+    if (!error) {
+      setJobs(prev => prev.filter(j => j.id !== id))
+      showToast('Job record deleted.', 'info')
+    }
+    setDeletingId(null)
   }
 
   return (
@@ -158,7 +163,7 @@ export default function ApprovalsPage() {
                       </a>
                     )}
                     <button
-                      onClick={() => handleDelete(job.id)}
+                      onClick={() => setDeletingId(job.id)}
                       className="p-1.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-all"
                       title="Delete Record"
                     >
@@ -212,11 +217,40 @@ export default function ApprovalsPage() {
         </div>
       )}
 
+      {/* Delete Confirmation Modal */}
+      {deletingId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white border border-slate-200 rounded-3xl p-6 max-w-sm w-full shadow-2xl space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center">
+              <Trash2 size={24} />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Delete Job Discovery</h3>
+              <p className="text-sm text-slate-500 mt-1">Are you sure you want to delete this job discovery record? This action cannot be undone.</p>
+            </div>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                onClick={() => setDeletingId(null)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => confirmDelete(deletingId)}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-sm font-semibold text-white transition-all shadow-md shadow-rose-600/20"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Floating Glass Toast Notification */}
       {toast && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900/90 text-white backdrop-blur-2xl border border-white/20 px-5 py-3.5 rounded-2xl shadow-2xl font-medium text-xs flex items-center gap-2.5 animate-bounce">
-          <CheckCircle size={16} className="text-emerald-400" />
-          <span>{toast.text}</span>
+        <div className="fixed bottom-6 right-6 z-50 bg-white/95 text-black border border-slate-300/80 backdrop-blur-2xl px-5 py-3.5 rounded-2xl shadow-2xl font-bold text-xs flex items-center gap-2.5 animate-bounce">
+          <CheckCircle size={16} className="text-emerald-600" />
+          <span className="text-black font-bold">{toast.text}</span>
         </div>
       )}
     </div>

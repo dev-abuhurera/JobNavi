@@ -30,7 +30,7 @@ graph TD
     A[Supabase Cloud Database & Auth & Storage] <-- REST/WS --> B[Next.js Web App]
     A <-- Realtime DB Queue --> C[Autonomous Agent Worker]
     C <-- Playwright Automation --> D[Job Portals - LinkedIn, Glassdoor, etc.]
-    C <-- LLM API --> E[Groq AI / Serper]
+     C <-- LLM API --> E[Groq AI]
 ```
 
 ---
@@ -41,7 +41,6 @@ graph TD
 - Node.js **v18+** or **v20 LTS**
 - A **Supabase** account ([supabase.com](https://supabase.com))
 - A **Groq** API Key ([groq.com](https://groq.com))
-- A **Serper** API Key ([serper.dev](https://serper.dev))
 
 ---
 
@@ -70,9 +69,8 @@ NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key_here
 SUPABASE_SERVICE_ROLE_KEY=your_service_role_key_here
 
-# AI & Search APIs
+# AI Engine
 GROQ_API_KEY=gsk_key1,gsk_key2
-SERPER_API_KEY=your_serper_api_key_here
 
 # Automation & Headless Chrome Settings
 HEADLESS=true
@@ -147,7 +145,7 @@ Docker handles all Linux Playwright Chromium system dependencies out of the box.
 
 1. **Deploy Web Dashboard to Vercel:**
    - Import the repository on [Vercel](https://vercel.com).
-   - Set environment variables (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GROQ_API_KEY`, `SERPER_API_KEY`).
+   - Set environment variables (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `GROQ_API_KEY`).
    - Deploy.
 
 2. **Deploy Background Worker to a Linux VPS (or Railway / Render Background Worker):**

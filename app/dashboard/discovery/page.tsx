@@ -44,26 +44,27 @@ export default function DiscoveryPage() {
   }, [supabase])
 
   useEffect(() => {
+    let channel: any = null
     loadData()
     window.addEventListener('focus', loadData)
 
     supabase.auth.getUser().then(({ data }) => {
       const uid = data.user?.id
-      if (!uid || chanRef.current) return
-      const ch = supabase.channel('tasks-' + uid)
+      if (!uid) return
+      const chName = `tasks-${uid}-${Math.random().toString(36).substring(2, 8)}`
+      const ch = supabase.channel(chName)
       ch.on('postgres_changes',
         { event: '*', schema: 'public', table: 'discovery_tasks', filter: `user_id=eq.${uid}` },
         () => loadData()
       )
       ch.subscribe()
-      chanRef.current = ch
+      channel = ch
     })
 
     return () => {
       window.removeEventListener('focus', loadData)
-      if (chanRef.current) {
-        supabase.removeChannel(chanRef.current)
-        chanRef.current = null
+      if (channel) {
+        supabase.removeChannel(channel)
       }
     }
   }, [loadData, supabase])
@@ -111,8 +112,8 @@ export default function DiscoveryPage() {
     }
     if (status === 'running') {
       return (
-        <span className="inline-flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 border border-amber-200 animate-pulse">
-          <Sparkles size={12} className="text-amber-600" /> Searching...
+        <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 border border-amber-200 backdrop-blur-md">
+          <Loader2 size={12} className="animate-spin text-amber-600" /> Searching...
         </span>
       )
     }
@@ -130,6 +131,8 @@ export default function DiscoveryPage() {
     )
   }
 
+  const activeTask = tasks.find(t => t.status === 'running' || t.status === 'queued') || (loading ? { keywords, location, status: 'running' } : null)
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -141,6 +144,38 @@ export default function DiscoveryPage() {
           <h1 className="font-display text-3xl font-bold tracking-tight text-slate-900">Discover Jobs</h1>
         </div>
       </header>
+
+      {/* Active Search Mission Radar Card */}
+      {activeTask && (
+        <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-teal-950 text-white rounded-3xl p-6 shadow-xl border border-teal-500/30 relative overflow-hidden">
+          <div className="absolute top-0 right-0 -mr-10 -mt-10 w-48 h-48 bg-emerald-500/20 rounded-full blur-3xl pointer-events-none" />
+          <div className="flex flex-col sm:flex-row items-center gap-5 relative z-10">
+            {/* Animated Radar Search Circle */}
+            <div className="relative shrink-0 flex items-center justify-center w-16 h-16">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-40"></span>
+              <span className="animate-spin absolute inline-flex h-14 w-14 rounded-full border-2 border-emerald-400 border-t-transparent"></span>
+              <div className="w-12 h-12 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center shadow-lg shadow-emerald-500/40">
+                <Loader2 size={24} className="animate-spin" />
+              </div>
+            </div>
+
+            <div className="flex-1 text-center sm:text-left space-y-1">
+              <div className="flex items-center justify-center sm:justify-start gap-2">
+                <span className="font-mono text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 inline-flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  AI Search Engine Active
+                </span>
+              </div>
+              <h3 className="font-display font-bold text-xl text-white">
+                Searching matching jobs...
+              </h3>
+              <p className="text-xs text-slate-300">
+                Scanning portals for <span className="font-semibold text-emerald-300">{Array.isArray(activeTask.keywords) ? activeTask.keywords.join(', ') : activeTask.keywords}</span> in <span className="font-semibold text-emerald-300">{activeTask.location || 'Remote'}</span>
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main 2-Column Glass Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

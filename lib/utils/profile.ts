@@ -1,24 +1,9 @@
-// ─────────────────────────────────────────────────────────────────
-// lib/utils/profile.ts
-// Profile normalization — moved from portal_automation_hybrid.ts
-// so it can be imported cleanly by the worker and any future code.
-// ─────────────────────────────────────────────────────────────────
 
 import type { NormalizedProfile } from '../types'
 import { logger } from '../logger'
 
 export type { NormalizedProfile }
 
-/**
- * Maps the raw profile_data JSONB blob (with whatever keys it happens to have)
- * into a guaranteed-key NormalizedProfile. Logs a warning for any required
- * field that ends up empty after checking all known aliases.
- *
- * Supports flat keys (raw.email) and common nested shapes:
- *   { contact: { email, phone } }
- *   { personal_info: { city, dob } }
- *   { personalInfo: { linkedin } }
- */
 export function normalizeProfile(raw: Record<string, any>): NormalizedProfile {
   // Flatten one level of common nested containers
   const containers = [
@@ -47,13 +32,25 @@ export function normalizeProfile(raw: Record<string, any>): NormalizedProfile {
     return ''
   }
 
+  // Fallback extraction from resume_text if key fields missing
+  const resumeStr = String(flat.resume_text || raw.resume_text || '')
+  let extractedEmail = ''
+  let extractedPhone = ''
+  if (resumeStr) {
+    const emailMatch = resumeStr.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)
+    if (emailMatch) extractedEmail = emailMatch[0]
+
+    const phoneMatch = resumeStr.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}/)
+    if (phoneMatch && phoneMatch[0].length >= 7) extractedPhone = phoneMatch[0]
+  }
+
   const profile: NormalizedProfile = {
     name: pick('name', 'full_name', 'fullName', 'candidate_name', 'candidateName', 'display_name'),
-    email: pick('email', 'email_address', 'emailAddress', 'contact_email', 'user_email'),
+    email: pick('email', 'email_address', 'emailAddress', 'contact_email', 'user_email') || extractedEmail,
     phone: pick(
       'phone', 'phone_number', 'phoneNumber', 'mobile', 'mobile_number',
       'contact_number', 'contactNumber', 'tel', 'whatsapp', 'whatsapp_number'
-    ),
+    ) || extractedPhone,
     city: pick(
       'city', 'location', 'address', 'current_location', 'currentLocation',
       'current_city', 'town', 'residence'
@@ -62,9 +59,21 @@ export function normalizeProfile(raw: Record<string, any>): NormalizedProfile {
       'linkedin_url', 'linkedin', 'linkedinUrl', 'linkedin_profile',
       'linkedinProfile', 'linked_in', 'linkedin_link'
     ),
+    portfolio_url: pick(
+      'portfolio_url', 'portfolio', 'portfolioUrl', 'website',
+      'personal_website', 'personalWebsite', 'site', 'portfolio_link'
+    ),
+    github_url: pick(
+      'github_url', 'github', 'githubUrl', 'github_profile',
+      'githubProfile', 'git_hub', 'github_link'
+    ),
     expected_salary: pick(
       'expected_salary', 'salary_expectation', 'salary', 'expectedSalary',
       'desired_salary', 'salary_expected', 'expected_salary_pkr'
+    ),
+    hourly_rate: pick(
+      'hourly_rate', 'hourly_rate_expectation', 'hourly_rate_usd', 'hourlyRate',
+      'desired_hourly_rate', 'hourly_pay', 'hourly_wage'
     ),
     years_of_experience: pick(
       'years_of_experience', 'experience_years', 'experienceYears',

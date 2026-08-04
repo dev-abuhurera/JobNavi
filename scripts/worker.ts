@@ -1,11 +1,12 @@
 import { PortalAutomationHybrid } from '../lib/automation/portal_automation_hybrid'
+import { PlaywrightDiscovery } from '../lib/automation/playwright_discovery'
 import { batchFilterJobsByProfile, UserProfile } from '../lib/utils/matching'
 import { isRealUrl, isRealJobTitle, getSourceName, classifyApplicationType } from '../lib/utils/url'
 import { GroqRotatingClient } from '../lib/groq-client'
 import { validateConfig } from '../lib/config'
 import { logger } from '../lib/logger'
+import { z } from 'zod'
 import { createClient } from '@supabase/supabase-js'
-import axios from 'axios'
 import * as dotenv from 'dotenv'
 import http from 'http'
 
@@ -14,175 +15,122 @@ const cfg = validateConfig()
 
 const supabase = createClient(cfg.supabaseUrl, cfg.supabaseServiceRoleKey)
 
-// Optional HTTP Server for Cloud Hosting Health Checks (e.g. Render Web Service bypass)
-const healthPort = process.env.PORT || 10000
-const healthServer = http.createServer((req, res) => {
+// Minimal HTTP server for deployment health checks (dynamic port allocation)
+const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/json' })
-  res.end(JSON.stringify({ status: 'ok', service: 'jobnavi-worker' }))
+  res.end(JSON.stringify({ status: 'ok', time: new Date().toISOString() }))
 })
-healthServer.listen(healthPort, () => {
-  logger.info('[Worker]', `Worker health check HTTP server listening on port ${healthPort}`)
+const requestedPort = process.env.WORKER_PORT ? parseInt(process.env.WORKER_PORT, 10) : (process.env.PORT && process.env.PORT !== '3000' ? parseInt(process.env.PORT, 10) : 0)
+
+server.on('error', (err: any) => {
+  if (err.code === 'EADDRINUSE') {
+    logger.warn('[Worker]', `Requested port is busy. Binding health check server to an available free port...`)
+    server.listen(0)
+  } else {
+    logger.error('[Worker]', `Health check server error:`, err.message)
+  }
 })
 
-async function log(userId: string, msg: string, level: 'info' | 'success' | 'error' | 'warn' = 'info') {
-  logger[level]('[Worker]', msg)
-  await supabase.from('activity_logs').insert({ user_id: userId, msg, level })
+server.listen(requestedPort, () => {
+  const addr = server.address()
+  const assignedPort = typeof addr === 'object' && addr ? addr.port : requestedPort
+  logger.info('[Worker]', `Health check server listening on port ${assignedPort}`)
+})
+
+async function log(userId: string, message: string, level: 'info' | 'warn' | 'error' = 'info') {
+  try {
+    const { error } = await supabase.from('activity_logs').insert({
+      user_id: userId,
+      msg: message,
+      level,
+    })
+    if (error) {
+      logger.error('[Worker]', `Failed to write activity log: ${error.message}`)
+    }
+  } catch (e) {
+    logger.error('[Worker]', `Failed to write activity log:`, e)
+  }
 }
 
 async function getUserProfile(userId: string): Promise<UserProfile> {
-  const { data, error } = await supabase
+  const { data: p } = await supabase
     .from('profiles')
-    .select('*')
+    .select('profile_data')
     .eq('user_id', userId)
-    .single()
+    .maybeSingle()
 
-  if (error || !data) throw new Error('User profile not found. Please upload your CV first.')
-
-  const pd = data.profile_data || {}
+  const pd = p?.profile_data || {}
   return {
     userId,
     name: pd.name || '',
+    email: pd.email || '',
+    phone: pd.phone || '',
+    city: pd.city || '',
+    linkedin_url: pd.linkedin_url || '',
+    website: pd.website || '',
+    years_of_experience: pd.years_of_experience || 0,
+    expected_salary: pd.expected_salary || '',
+    current_salary: pd.current_salary || '',
+    notice_period: pd.notice_period || '',
+    work_authorized: pd.work_authorized || 'yes',
+    requires_visa_sponsorship: pd.requires_visa_sponsorship || 'no',
+    willing_to_relocate: pd.willing_to_relocate ?? true,
     skills: pd.skills || [],
-    experience_summary:
-      pd.experience_summary ||
-      pd.experience?.map((e: any) => e.title || e).join(', ') ||
-      '',
-    dense_summary: pd.dense_summary || '',
     desired_roles: pd.desired_roles || [],
-    preferred_tech: pd.preferred_tech || [],
+    experience_summary: pd.experience_summary || '',
+    dense_summary: pd.dense_summary || '',
     resume_text: pd.resume_text || '',
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Job Discovery
-// ─────────────────────────────────────────────────────────────────
-
-async function discoverJobs(keywords: string[], location: string, profile: UserProfile) {
-  let allDiscovered: any[] = []
-  const serperKey = cfg.serperApiKey
-
-  if (serperKey) {
-    const queryList: string[] = []
-
-    // 1. Search for user-requested keywords on LinkedIn (Past 24 Hours)
-    for (const kw of keywords) {
-      const cleanKw = kw.trim()
-      if (!cleanKw) continue
-      queryList.push(`${cleanKw} site:linkedin.com/jobs/view`)
-      if (location && location.toLowerCase() !== 'remote') {
-        queryList.push(`${cleanKw} ${location} site:linkedin.com/jobs/view`)
-      }
-    }
-
-    // 2. Also search based on top skills from candidate's profile to discover up to 30-40 jobs
-    if (profile.skills && profile.skills.length > 0) {
-      for (const skill of profile.skills.slice(0, 2)) {
-        if (skill && skill.length > 2) {
-          queryList.push(`${skill.trim()} Developer site:linkedin.com/jobs/view`)
-        }
-      }
-    }
-
-    // Deduplicate & take top 4 unique 24-hour LinkedIn queries (~30-40 raw job candidates)
-    const uniqueQueries = Array.from(new Set(queryList)).slice(0, 4)
-
-    for (const q of uniqueQueries) {
-      try {
-        logger.info('[Discovery]', `Searching LinkedIn (Past 24h): ${q}`)
-        const { data } = await axios.post(
-          'https://google.serper.dev/search',
-          { q, num: 10, tbs: 'qdr:d' }, // tbs: 'qdr:d' restricts strictly to past 24 hours (day)
-          { headers: { 'X-API-KEY': serperKey, 'Content-Type': 'application/json' } }
-        )
-
-        const results = (data.organic || [])
-          .filter((r: any) => isRealUrl(r.link) && isRealJobTitle(r.title))
-          .map((r: any) => {
-            let cleanTitle = r.title
-              .replace(/ \| LinkedIn/g, '')
-              .replace(/\.\.\.$/g, '')
-              .trim()
-
-            let companyName = 'Unknown'
-
-            if (cleanTitle.includes(' hiring ')) {
-              const parts = cleanTitle.split(' hiring ')
-              companyName = parts[0].trim()
-              cleanTitle = parts[1].split(' in ')[0].trim()
-            }
-
-            if (companyName === 'Unknown' || companyName.length > 50) {
-              const lowerSnippet = (r.snippet || '').toLowerCase()
-              if (!lowerSnippet.includes('full job description') && !lowerSnippet.startsWith('position:')) {
-                const potentialCompany = r.snippet?.split(' · ')[0]?.split(' - ')[0]?.trim()
-                if (potentialCompany && potentialCompany.length > 2 && potentialCompany.length < 40) {
-                  companyName = potentialCompany
-                }
-              }
-            }
-
-            if (companyName === 'Unknown') {
-              companyName = getSourceName(r.link).toUpperCase()
-            }
-
-            return {
-              title: cleanTitle,
-              company: companyName,
-              source_url: r.link,
-              source: getSourceName(r.link),
-              location: location || 'Remote',
-              description: r.snippet || '',
-              application_type: classifyApplicationType(r.link),
-            }
-          })
-          .filter((j: any) => {
-            const isGoodLength = j.title.length > 5 && j.title.length < 80 && j.company.length > 2 && j.company.length < 50
-            const isNotDescription = !j.company.toLowerCase().includes('job description') && !j.company.toLowerCase().includes('hourly') && !j.company.toLowerCase().includes('join or sign in')
-            
-            // Exclude spammy third-party staffing agencies on LinkedIn like Crossing Hurdles
-            const thirdPartyAgencies = [
-              'crossing hurdles', 'jobs via dice', 'fetchjobs.co', 'engine', 'crossover', 
-              'toptal', 'turing', 'braintrust', 'cybercoders', 'teksystems', 'robert half',
-              'jobot', 'harnham', 'kforce', 'apex systems', 'insight global', 'randstad', 
-              'lhh', 'kelly services', 'jobright', 'actalent', 'beacon hill', 'modis'
-            ]
-
-            const companyLower = j.company.toLowerCase()
-            const descLower = (j.description || '').toLowerCase()
-
-            const isThirdParty = thirdPartyAgencies.some(agency => 
-              companyLower.includes(agency) || descLower.includes(agency)
-            )
-
-            return isGoodLength && isNotDescription && !isThirdParty
-          })
-
-        logger.info('[Discovery]', `Serper: ${results.length} valid LinkedIn jobs from query`)
-        allDiscovered = [...allDiscovered, ...results]
-        await new Promise(r => setTimeout(r, 500))
-      } catch (err: any) {
-        logger.error('[Discovery]', `Serper query failed: ${err.response?.data?.message || err.message}`)
-      }
-    }
+// ── DISCOVERY PASS (PLAYWRIGHT DIRECT) ──
+async function discoverJobs(keywords: string[], location: string, profile: UserProfile): Promise<any[]> {
+  logger.info('[Discovery]', `Starting Playwright Direct LinkedIn Discovery for keywords: [${keywords.join(', ')}] in "${location}"`)
+  
+  const existingJobUrls = new Set<string>()
+  const existingJobKeys = new Set<string>()
+  
+  const { data: dbJobs } = await supabase.from('jobs').select('source_url, title, company')
+  if (dbJobs) {
+    dbJobs.forEach(j => {
+      if (j.source_url) existingJobUrls.add(j.source_url)
+      if (j.title && j.company) existingJobKeys.add(`${j.title.toLowerCase()}|${j.company.toLowerCase()}`)
+    })
   }
 
-  const seen = new Set<string>()
-  const unique = allDiscovered.filter(j => {
-    if (!j.source_url || seen.has(j.source_url)) return false
-    seen.add(j.source_url)
-    return true
-  })
+  const discoveredRaw = await PlaywrightDiscovery.discoverJobs(
+    keywords,
+    location,
+    existingJobUrls,
+    existingJobKeys
+  )
 
-  logger.info('[Discovery]', `${unique.length} unique jobs before Stage 1 profile matching`)
-  const stage1Matched = await batchFilterJobsByProfile(unique, profile)
-  logger.info('[Discovery]', `${stage1Matched.length} jobs after Stage 1 vector filtering`)
+  if (discoveredRaw.length === 0) {
+    logger.info('[Discovery]', 'Playwright discovery found 0 new Easy Apply jobs')
+    return []
+  }
 
-  // Stage 2: Deep LLM Scoring with Groq (llama-3.3-70b-versatile)
+  // Stage 1 Vector Filtering
+  const stage1Matched = await batchFilterJobsByProfile(discoveredRaw, profile)
+  if (stage1Matched.length === 0) {
+    logger.info('[Discovery]', 'Stage 1 similarity matching filtered out all discovered jobs')
+    return []
+  }
+
+  // Stage 2 LangChain LLM Fit Evaluation
   const finalMatched = await evaluateJobsWithLLM(stage1Matched, profile)
-  logger.info('[Discovery]', `${finalMatched.length} jobs ready after Stage 2 Groq LLM evaluation`)
-  return finalMatched
+  const candidateJobs = finalMatched.filter(j => isRealJobTitle(j.title))
+
+  logger.info('[Discovery]', `${candidateJobs.length} verified 24h Easy Apply jobs ready to save`)
+  return candidateJobs
 }
+
+const ZodJobMatchSchema = z.object({
+  fit_score: z.number().min(0).max(100).describe('Integer score between 0 and 100'),
+  reason: z.string().describe('Short explanation of candidate fit'),
+  tech_stack: z.array(z.string()).describe('List of main technologies required'),
+  is_match: z.boolean().describe('True if candidate is a good match'),
+})
 
 async function evaluateJobsWithLLM(jobs: any[], profile: UserProfile): Promise<any[]> {
   if (!cfg.groqApiKey || jobs.length === 0) return jobs
@@ -190,34 +138,31 @@ async function evaluateJobsWithLLM(jobs: any[], profile: UserProfile): Promise<a
   const client = new GroqRotatingClient(cfg.groqApiKey)
   const evaluated: any[] = []
 
-  logger.info('[Discovery]', `Running Stage 2 Groq LLM evaluation on top ${Math.min(jobs.length, 15)} candidate jobs...`)
+  logger.info('[Discovery]', `Running Stage 2 LangChain LLM evaluation on top ${Math.min(jobs.length, 50)} candidate jobs...`)
 
-  for (const job of jobs.slice(0, 15)) {
+  for (const job of jobs.slice(0, 50)) {
     try {
       const profileSummary = profile.dense_summary || profile.experience_summary || (profile.resume_text || '').slice(0, 500)
-      const prompt = `
-You are an expert AI job search evaluator. Compare the following Candidate Profile with the Job Opportunity.
+      
+      const systemPrompt = `You are an expert AI job search evaluator. Compare the candidate profile with the job opportunity and output a structured match decision.`
 
-Candidate Profile:
+      const userPrompt = `CANDIDATE PROFILE:
 - Desired Roles: ${profile.desired_roles?.join(', ') || 'Software Engineer'}
 - Skills: ${profile.skills?.slice(0, 12).join(', ') || 'Software Development'}
 - Resume Summary: "${profileSummary}"
 
-Job Opportunity:
+JOB OPPORTUNITY:
 - Title: "${job.title}"
 - Company: "${job.company}"
-- Description: "${job.description}"
+- Description: "${job.description}"`
 
-Instructions:
-Evaluate how well the candidate fits this job opportunity.
-Return a JSON object with:
-- "fit_score": integer between 0 and 100 representing overall fit.
-- "reason": 1 short sentence explaining why it fits or does not fit.
-- "tech_stack": array of strings listing up to 5 main technologies mentioned in the job.
-- "is_match": boolean true if fit_score >= 45, otherwise false.
-`
-
-      const res = await client.chatJSON<{ fit_score: number; reason: string; tech_stack: string[]; is_match: boolean }>(prompt)
+      const res = await client.chatStructured<z.infer<typeof ZodJobMatchSchema>>(
+        [
+          ['system', systemPrompt],
+          ['human', userPrompt],
+        ],
+        ZodJobMatchSchema
+      )
 
       if (res && typeof res.fit_score === 'number' && res.fit_score >= 40 && res.is_match !== false) {
         evaluated.push({
@@ -227,25 +172,16 @@ Return a JSON object with:
           match_reason: res.reason || '',
         })
       } else {
-        logger.info('[Discovery]', `Groq Stage 2 rejected "${job.title}" (Score: ${res?.fit_score || 0}): ${res?.reason || 'Low relevance'}`)
+        logger.info('[Discovery]', `LangChain Stage 2 rejected "${job.title}" (Score: ${res?.fit_score || 0}): ${res?.reason || 'Low relevance'}`)
       }
     } catch (err: any) {
-      logger.warn('[Discovery]', `Groq Stage 2 evaluation failed for "${job.title}": ${err.message}. Retaining Stage 1 score.`)
+      logger.warn('[Discovery]', `LangChain Stage 2 evaluation failed for "${job.title}": ${err.message}. Retaining Stage 1 score.`)
       evaluated.push(job)
     }
   }
 
-  // Include remaining jobs that weren't evaluated in top 15 if needed
-  if (jobs.length > 15) {
-    evaluated.push(...jobs.slice(15))
-  }
-
-  return evaluated.sort((a, b) => (b.fit_score || 0) - (a.fit_score || 0))
+  return evaluated
 }
-
-// ─────────────────────────────────────────────────────────────────
-// Save Jobs
-// ─────────────────────────────────────────────────────────────────
 
 async function saveJobs(jobs: any[], userId: string) {
   let savedCount = 0
@@ -259,199 +195,186 @@ async function saveJobs(jobs: any[], userId: string) {
   })
 
   const records = clean.map(job => {
-    const { similarity, ...dbJob } = job
     return {
       user_id: userId,
-      title: dbJob.title,
-      company: dbJob.company || 'Unknown',
-      location: dbJob.location || 'Remote',
-      description: dbJob.description || null,
-      source_url: dbJob.source_url,
-      source: dbJob.source || 'web',
-      tech_stack: dbJob.tech_stack || [],
-      fit_score: dbJob.fit_score ?? null,
-      recruiter_email: dbJob.recruiter_email || null,
-      application_type: dbJob.application_type || classifyApplicationType(dbJob.source_url),
-      posting_date: dbJob.posting_date || null,
+      title: job.title,
+      company: job.company || 'Unknown',
+      location: job.location || 'Remote',
+      description: job.description || '',
+      source_url: job.source_url,
+      source: getSourceName(job.source_url),
+      fit_score: job.fit_score || 50,
+      tech_stack: job.tech_stack || [],
       status: 'discovered',
+      application_type: classifyApplicationType(job.source_url)
     }
   })
 
-  if (records.length > 0) {
-    const { data, error } = await supabase
-      .from('jobs')
-      .upsert(records, { onConflict: 'user_id,source_url', ignoreDuplicates: true })
-      .select('id')
-
-    if (error) {
-      errorCount = records.length
-      logger.error('[Save]', `Batch insert failed: ${error.message}`)
-    } else {
-      savedCount = data?.length || 0
-      skippedCount += records.length - savedCount
+  for (const record of records) {
+    try {
+      const { error } = await supabase.from('jobs').insert(record)
+      if (!error) {
+        savedCount++
+      } else if (error.code === '23505') {
+        skippedCount++
+      } else {
+        errorCount++
+        logger.error('[Worker]', `Failed to save job "${record.title}": ${error.message} (Code: ${error.code})`)
+      }
+    } catch (e: any) {
+      errorCount++
+      logger.error('[Worker]', `Exception saving job "${record.title}": ${e?.message || e}`)
     }
   }
 
-  logger.info('[Save]', `Saved: ${savedCount}, Skipped: ${skippedCount}, Errors: ${errorCount}`)
-  return { savedCount, errorCount, skippedCount }
+  logger.info('[Worker]', `Job saving step complete: ${savedCount} saved, ${skippedCount} skipped, ${errorCount} errors.`)
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Process Applications
-// ─────────────────────────────────────────────────────────────────
-
-async function processApplication(app: any) {
-  let automation: PortalAutomationHybrid | null = null
-
-  try {
-    const { data: job } = await supabase
-      .from('jobs')
-      .select('*')
-      .eq('id', app.job_id)
-      .single()
-
-    if (!job) throw new Error('Job not found for application')
-
-    const manualTypes = ['manual', 'serper', 'web', undefined, null]
-    if (manualTypes.includes(job.application_type)) {
-      await supabase.from('applications').update({
-        current_status: 'skipped',
-        notes: 'This job requires manual application. Visit the job URL directly.'
-      }).eq('id', app.id)
-      return
-    }
-
-    if (!job.source_url || !isRealUrl(job.source_url)) {
-      await supabase.from('applications').update({
-        current_status: 'skipped',
-        notes: 'Invalid or aggregator URL. Cannot automate.'
-      }).eq('id', app.id)
-      return
-    }
-
-    automation = new PortalAutomationHybrid(supabase, cfg.groqApiKey)
-    const portal = job.source || 'linkedin'
-    await automation.init(app.user_id, portal)
-
-    const result = await automation.applyToJob(app.job_id, app.user_id)
-
-    if (result.status === 'applied') {
-      await supabase.from('applications').update({
-        current_status: 'applied',
-        date_applied: new Date().toISOString(),
-        notes: `Applied via ${portal} automation. Screenshot: ${result.screenshot || 'none'}`
-      }).eq('id', app.id)
-    } else if (result.status === 'session_expired') {
-      await supabase.from('applications').update({
-        current_status: 'session_expired',
-        notes: `Session expired for ${portal}. Please reconnect in Settings.`
-      }).eq('id', app.id)
-    } else if (result.status === 'unconfirmed') {
-      await supabase.from('applications').update({
-        current_status: 'unconfirmed',
-        notes: result.message || 'Application step finished but confirmation screenshot unverified.'
-      }).eq('id', app.id)
-    } else {
-      throw new Error(result.message || `Application status: ${result.status}`)
-    }
-  } finally {
-    await new Promise(r => setTimeout(r, 2000))
-    if (automation) await automation.cleanup()
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Main Loop
-// ─────────────────────────────────────────────────────────────────
-
-let isShuttingDown = false
-
-async function claimTask() {
-  const { data: pending } = await supabase
+// ── ON-DEMAND FRONTEND DISCOVERY TASK LISTENER ──
+async function processPendingDiscoveryTasks() {
+  const { data: pendingTasks } = await supabase
     .from('discovery_tasks')
     .select('*')
     .eq('status', 'pending')
+    .order('created_at', { ascending: true })
     .limit(1)
 
-  if (!pending || pending.length === 0) return null
+  if (!pendingTasks || pendingTasks.length === 0) return
 
-  const task = pending[0]
-  // Atomic claim: only succeeds if still pending
-  const { data: claimed } = await supabase
-    .from('discovery_tasks')
-    .update({ status: 'running' })
-    .eq('id', task.id)
-    .eq('status', 'pending')
-    .select()
-    .single()
+  for (const task of pendingTasks) {
+    try {
+      await supabase.from('discovery_tasks').update({ status: 'processing' }).eq('id', task.id)
+      await log(task.user_id, `🔍 Frontend triggered discovery task: "${task.keywords?.join(', ')}" in "${task.location}"`, 'info')
 
-  return claimed || null
+      const profile = await getUserProfile(task.user_id)
+      const keywords = (task.keywords && task.keywords.length) ? task.keywords : profile.desired_roles
+      const location = task.location || profile.city || 'Remote'
+
+      const discovered = await discoverJobs(keywords, location, profile)
+      if (discovered.length > 0) {
+        await saveJobs(discovered, task.user_id)
+        await log(task.user_id, `✅ Discovery complete: Saved ${discovered.length} Easy Apply jobs to queue.`, 'info')
+      } else {
+        await log(task.user_id, `ℹ️ Discovery complete: No new jobs found for criteria.`, 'info')
+      }
+
+      await supabase.from('discovery_tasks').update({ status: 'completed' }).eq('id', task.id)
+    } catch (err: any) {
+      logger.error('[Worker]', `Discovery task ${task.id} failed:`, err.message)
+      await supabase.from('discovery_tasks').update({ status: 'failed', error_message: err.message }).eq('id', task.id)
+    }
+  }
 }
 
-async function processTasks() {
-  logger.info('[Worker]', 'Agent Worker started. Polling every 5s...')
+// ── ON-DEMAND FRONTEND APPLICATION PROCESSOR ──
+async function processPendingApplications() {
+  const { data: pending, error } = await supabase
+    .from('applications')
+    .select('*')
+    .or('current_status.ilike.pending,current_status.ilike.queued')
+    .order('created_at', { ascending: true })
+    .limit(5)
 
-  while (!isShuttingDown) {
-    try {
-      const task = await claimTask()
-      if (task) {
-        const { id, user_id, keywords, location } = task
-        await log(user_id, `Starting discovery for: ${keywords.join(', ')} in ${location || 'Remote'}`, 'info')
-
-        try {
-          const profile = await getUserProfile(user_id)
-          const jobs = await discoverJobs(keywords, location || 'Remote', profile)
-          const { savedCount, errorCount, skippedCount } = await saveJobs(jobs, user_id)
-          await supabase.from('discovery_tasks').update({ status: 'completed' }).eq('id', id)
-          await log(user_id, `Discovery complete. Found ${jobs.length} matches. Saved ${savedCount} new jobs. (${skippedCount} skipped, ${errorCount} errors)`, 'success')
-        } catch (err) {
-          await supabase.from('discovery_tasks').update({ status: 'failed' }).eq('id', id)
-          await log(user_id, `Discovery failed: ${String(err)}`, 'error')
-        }
-      }
-
-      const { data: apps } = await supabase
-        .from('applications')
-        .select('*')
-        .eq('current_status', 'pending')
-        .limit(1)
-
-      if (apps && apps.length > 0) {
-        const app = apps[0]
-        await log(app.user_id, `Processing application for ${app.company}...`, 'info')
-        try {
-          await processApplication(app)
-          const { data: updatedApp } = await supabase
-            .from('applications')
-            .select('current_status')
-            .eq('id', app.id)
-            .single()
-
-          const st = updatedApp?.current_status
-          if (st === 'applied') await log(app.user_id, `Successfully applied for ${app.company}`, 'success')
-          else if (st === 'session_expired') await log(app.user_id, `Session expired for ${app.company}. Please reconnect in Settings.`, 'error')
-          else if (st === 'skipped') await log(app.user_id, `${app.company} skipped.`, 'info')
-          else await log(app.user_id, `Application for ${app.company} ended with status: ${st}`, 'info')
-        } catch (err) {
-          await log(app.user_id, `Application failed for ${app.company}: ${String(err)}`, 'error')
-          await supabase.from('applications').update({ current_status: 'failed', notes: String(err) }).eq('id', app.id)
-        }
-      }
-    } catch (err) {
-      logger.error('[Worker]', `Loop error: ${String(err)}`)
-    }
-
-    if (!isShuttingDown) await new Promise(r => setTimeout(r, 5000))
+  if (error) {
+    logger.error('[Worker]', 'Failed to fetch pending applications:', error.message)
+    return
   }
 
-  logger.info('[Worker]', 'Worker stopped gracefully.')
-  process.exit(0)
+  if (!pending || pending.length === 0) return
+
+  for (const app of pending) {
+    try {
+      // Mark as processing immediately so frontend reflects active status
+      await supabase.from('applications').update({ current_status: 'processing' }).eq('id', app.id)
+
+      let job = app.jobs
+
+      if (!job && app.job_id) {
+        const { data: fetchedJob } = await supabase
+          .from('jobs')
+          .select('*')
+          .eq('id', app.job_id)
+          .maybeSingle()
+        job = fetchedJob
+      }
+
+      const sourceUrl = job?.source_url || app.source_url || ''
+      const title = job?.title || app.job_title || 'Job Opportunity'
+      const company = job?.company || app.company || 'Company'
+      const appType = job?.application_type || (sourceUrl.includes('linkedin.com') ? 'linkedin_easy_apply' : 'manual')
+
+      if (!sourceUrl) {
+        await supabase.from('applications').update({
+          current_status: 'failed',
+          notes: 'Failed: Missing job source URL.'
+        }).eq('id', app.id)
+        continue
+      }
+
+      if (appType !== 'linkedin_easy_apply') {
+        await supabase.from('applications').update({
+          current_status: 'skipped',
+          notes: `Skipped: ${title} at ${company} is not a LinkedIn Easy Apply position.`
+        }).eq('id', app.id)
+        await log(app.user_id, `ℹ️ Skipped "${title}" at "${company}": Not a LinkedIn Easy Apply job`, 'info')
+        continue
+      }
+
+      await log(app.user_id, `🤖 Frontend requested auto-apply for "${title}" at "${company}"`, 'info')
+
+      const automation = new PortalAutomationHybrid(supabase, cfg.groqApiKey)
+      const portal = job?.source || app.source || 'linkedin'
+      const isHeadless = process.env.HEADLESS === 'true'
+      await automation.init(app.user_id, portal, isHeadless)
+
+      const targetJobId = job?.id || app.job_id || app.id
+      const result = await automation.applyToJob(targetJobId, app.user_id)
+
+      if (result.status === 'applied') {
+        await supabase.from('applications').update({
+          current_status: 'applied',
+          date_applied: new Date().toISOString(),
+          notes: `Applied via ${portal} automation. Screenshot: ${result.screenshot || 'none'}`
+        }).eq('id', app.id)
+        await log(app.user_id, `✅ Successfully applied to "${title}" at "${company}"!`, 'info')
+      } else if (result.status === 'job_closed') {
+        await supabase.from('applications').update({
+          current_status: 'closed',
+          notes: 'Job posting is no longer taking applications.'
+        }).eq('id', app.id)
+        await log(app.user_id, `⚠️ Job closed for "${title}" at "${company}".`, 'warn')
+      } else {
+        await supabase.from('applications').update({
+          current_status: 'failed',
+          notes: result.message || 'Application failed'
+        }).eq('id', app.id)
+        await log(app.user_id, `❌ Application failed for "${title}": ${result.message}`, 'error')
+      }
+    } catch (err: any) {
+      logger.error('[Worker]', `Application failed for application ${app.id}:`, err.message)
+      await supabase.from('applications').update({
+        current_status: 'failed',
+        notes: `Application failed: ${err.message}`
+      }).eq('id', app.id)
+    }
+  }
 }
 
-process.on('SIGINT', () => { isShuttingDown = true })
-process.on('SIGTERM', () => { isShuttingDown = true })
+// ── MAIN WORKER POLLING LOOP ──
+async function mainWorkerLoop() {
+  logger.info('[Worker]', 'Agent Worker started. Polling for Frontend On-Demand tasks & applications every 5s...')
+  while (true) {
+    try {
+      // 1. Process explicit user discovery tasks triggered from Frontend Dashboard
+      await processPendingDiscoveryTasks()
 
-processTasks().catch(err => {
-  logger.error('[Worker]', `Fatal: ${String(err)}`)
-  process.exit(1)
-})
+      // 2. Process explicit user application requests triggered from Frontend Dashboard
+      await processPendingApplications()
+    } catch (e: any) {
+      logger.error('[Worker]', 'Worker main loop error:', e.message)
+    }
+    await new Promise(r => setTimeout(r, 5000))
+  }
+}
+
+mainWorkerLoop()

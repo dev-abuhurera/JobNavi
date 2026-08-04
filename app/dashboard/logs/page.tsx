@@ -17,27 +17,34 @@ export default function LogsPage() {
     setLoading(false)
   }, [supabase])
 
-  const chanRef = useRef<any>(null)
   useEffect(() => {
+    let channel: any = null
     fetchLogs()
     supabase.auth.getUser().then(({ data }) => {
       const uid = data.user?.id
-      if (!uid || chanRef.current) return
-      const ch = supabase.channel('logs-' + uid)
+      if (!uid) return
+      const chName = `logs-${uid}-${Math.random().toString(36).substring(2, 8)}`
+      const ch = supabase.channel(chName)
       ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, (p) => setLogs(c => [p.new, ...c].slice(0, 50)))
       ch.on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, (p) => setLogs(c => c.filter(l => l.id !== p.old.id)))
       ch.subscribe()
-      chanRef.current = ch
+      channel = ch
     })
-    return () => { if (chanRef.current) { supabase.removeChannel(chanRef.current); chanRef.current = null } }
+    return () => {
+      if (channel) {
+        supabase.removeChannel(channel)
+      }
+    }
   }, [fetchLogs, supabase])
 
-  const clearLogs = async () => {
-    if (!window.confirm('Delete all logs?')) return
+  const [showClearModal, setShowClearModal] = useState(false)
+
+  const confirmClearLogs = async () => {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     await supabase.from('activity_logs').delete().eq('user_id', user.id)
     setLogs([])
+    setShowClearModal(false)
   }
 
   const renderBadge = (lvl: string) => {
@@ -118,7 +125,7 @@ export default function LogsPage() {
 
         <div className="flex items-center gap-3">
           <button
-            onClick={clearLogs}
+            onClick={() => setShowClearModal(true)}
             className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl text-xs font-semibold text-slate-700 hover:text-rose-600 bg-white/70 hover:bg-rose-50/80 border border-white/90 hover:border-rose-200 transition-all backdrop-blur-xl shadow-xs active:scale-95"
           >
             <Trash2 size={14} /> Clear Console
@@ -201,6 +208,35 @@ export default function LogsPage() {
           <span className="text-[11px] text-slate-400 font-sans font-medium">JobNavi Autonomous Agent v0.1.0</span>
         </div>
       </div>
+
+      {/* Clear Logs Modal */}
+      {showClearModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white border border-slate-200 rounded-3xl p-6 max-w-sm w-full shadow-2xl space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center">
+              <Trash2 size={24} />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Clear Console Logs</h3>
+              <p className="text-sm text-slate-500 mt-1">Are you sure you want to clear all session activity logs? This action cannot be undone.</p>
+            </div>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                onClick={() => setShowClearModal(false)}
+                className="flex-1 py-2.5 rounded-xl border border-slate-200 text-sm font-semibold text-slate-700 hover:bg-slate-50 transition-all"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmClearLogs}
+                className="flex-1 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-700 text-sm font-semibold text-white transition-all shadow-md shadow-rose-600/20"
+              >
+                Clear
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

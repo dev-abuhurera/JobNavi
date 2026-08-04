@@ -8,7 +8,6 @@ export interface AppConfig {
   supabaseUrl: string
   supabaseServiceRoleKey: string
   groqApiKey: string
-  serperApiKey: string | null
   chromeProfilePath: string
   chromeExecutablePath: string
 }
@@ -35,7 +34,6 @@ export function validateConfig(): AppConfig {
     supabaseUrl:           process.env.NEXT_PUBLIC_SUPABASE_URL!,
     supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
     groqApiKey:            process.env.GROQ_API_KEY!,
-    serperApiKey:          process.env.SERPER_API_KEY?.trim() || null,
 
     // Browser paths — override via env for portability across machines
     chromeProfilePath: process.env.CHROME_PROFILE_PATH ||
