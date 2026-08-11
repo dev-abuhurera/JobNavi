@@ -1,9 +1,4 @@
-// ─────────────────────────────────────────────────────────────────
-// lib/automation/form_dom_actions.ts
-// Production-Grade Autonomous Browser Action Engine.
-// Simulates human mechanical input variations, handles state transitions,
-// and enforces form validation integrity checks with defensive fallbacks.
-// ─────────────────────────────────────────────────────────────────
+
 
 import { Page, ElementHandle } from 'playwright'
 
@@ -32,48 +27,45 @@ export class FormDOMActions {
     if (!want || page.isClosed()) return false
 
     try {
-      // 1. Container-scoped or Modal-scoped Playwright Locators
       const modalLoc = page.locator('.jobs-easy-apply-modal, .jobs-easy-apply-content, [role="dialog"], .artdeco-modal').first()
+
+      // Helper to check if any radio in the container is checked
+      const checkContainerSelected = async (container: any) => {
+        return await container.evaluate((c: Element) => {
+          const radios = Array.from(c.querySelectorAll('input[type="radio"]')) as HTMLInputElement[]
+          return radios.some(r => r.checked)
+        }).catch(() => false)
+      }
 
       if (selector) {
         try {
           const inputLoc = page.locator(selector).first()
           if ((await inputLoc.count()) > 0) {
-            const containerLoc = inputLoc.locator('xpath=ancestor::fieldset | ancestor::*[@role="radiogroup"] | ancestor::*[contains(@class, "fb-dash-form-element")] | ancestor::*[contains(@class, "jobs-easy-apply-form-section__element")]').first()
+            const containerLoc = inputLoc.locator('xpath=ancestor::*[self::fieldset or @role="radiogroup" or contains(@class, "fb-dash-form-element") or contains(@class, "jobs-easy-apply-form-section__element") or contains(@class, "artdeco-form-element")]').first()
             const scope = (await containerLoc.count()) > 0 ? containerLoc : modalLoc
 
-            const exactInContainer = scope.getByText(want, { exact: true })
-            if ((await exactInContainer.count()) > 0) {
-              await exactInContainer.first().click({ force: true })
-              return true
-            }
+            const wantCap = want.charAt(0).toUpperCase() + want.slice(1).toLowerCase()
+            const matchers = [
+              scope.locator('label').filter({ hasText: new RegExp(`^\\s*${want}\\s*$`, 'i') }),
+              scope.getByRole('radio', { name: new RegExp(`^${want}$`, 'i') }),
+              scope.locator('label').filter({ hasText: new RegExp(`^${want}`, 'i') }),
+              scope.getByText(wantCap, { exact: true }),
+            ]
 
-            const partialInContainer = scope.getByText(want, { exact: false })
-            if ((await partialInContainer.count()) > 0) {
-              await partialInContainer.first().click({ force: true })
-              return true
+            for (const m of matchers) {
+              if ((await m.count()) > 0) {
+                await m.first().click({ force: true })
+                await this.delay(100, 200)
+                const verified = await checkContainerSelected((await containerLoc.count()) > 0 ? containerLoc : scope)
+                if (verified) return true
+              }
             }
           }
-        } catch { /* fallback */ }
+        } catch { /* fallback to DOM evaluate */ }
       }
 
-      // If specific selector missed, try modal-level text locator
-      try {
-        const modalScope = (await modalLoc.count()) > 0 ? modalLoc : page
-        const exactModal = modalScope.getByText(want, { exact: true })
-        if ((await exactModal.count()) > 0) {
-          await exactModal.first().click({ force: true })
-          return true
-        }
-        const roleModal = modalScope.getByRole('radio', { name: want })
-        if ((await roleModal.count()) > 0) {
-          await roleModal.first().click({ force: true })
-          return true
-        }
-      } catch { /* fallback to DOM evaluate */ }
-
-      // 2. DOM Evaluate Fallback for Ember/React pointer dispatch
-      const target = await page.evaluate(({ sel, want }) => {
+      // 2. DOM Evaluate Fallback for Ember/React pointer dispatch & state verification
+      const isSelectedInDom = await page.evaluate(({ sel, want }) => {
         let input = sel ? (document.querySelector(sel) as HTMLInputElement | null) : null
         const modal = document.querySelector('.jobs-easy-apply-content, .artdeco-modal, [role="dialog"]') || document.body
 
@@ -100,7 +92,7 @@ export class FormDOMActions {
           }
         }
 
-        if (!input || group.length === 0) return null
+        if (!input || group.length === 0) return false
 
         const labelOf = (r: HTMLInputElement) => {
           let text = ''
@@ -108,31 +100,38 @@ export class FormDOMActions {
             const lEl = document.querySelector(`label[for="${r.id}"]`)
             if (lEl) text = lEl.textContent || ''
           }
-          if (!text && r.closest) {
-            const pEl = r.closest('label') || r.closest('.artdeco-radio') || r.parentElement
-            if (pEl) text = pEl.textContent || ''
+          if (!text) {
+            const parentLbl = r.closest('label') || r.closest('.artdeco-radio') || r.closest('.fb-dash-form-element__option')
+            if (parentLbl) text = parentLbl.textContent || ''
+          }
+          if (!text && r.parentElement) {
+            text = r.parentElement.textContent || ''
           }
           if (!text) text = r.value || ''
           return text.replace(/\s+/g, ' ').trim().toLowerCase()
         }
 
         const wantLower = want.toLowerCase()
-        const positive = ['yes', 'i am', 'authorized', 'authorised', 'do have', 'willing', 'able to', 'citizen', 'expert', 'frequently']
-        const negative = ['no', 'not ', 'do not', "don't", 'unable', 'require sponsorship', 'beginner']
 
         let match = group.find(r => {
           const l = labelOf(r)
+          const valLower = (r.value || '').toLowerCase()
+          if (valLower === wantLower) return true
           if (!l) return false
-          if (wantLower === 'yes' || wantLower === 'true') return l.startsWith('yes') || positive.some(p => l.includes(p))
-          if (wantLower === 'no' || wantLower === 'false') return l.startsWith('no') || negative.some(n => l.includes(n))
-          return l === wantLower || l.includes(wantLower) || wantLower.includes(l)
+          if (wantLower === 'yes' || wantLower === 'true') {
+            return l === 'yes' || l.startsWith('yes') || l.includes('authorized') || l.includes('authorised') || l.includes('willing') || valLower === 'yes'
+          }
+          if (wantLower === 'no' || wantLower === 'false') {
+            return l === 'no' || l.startsWith('no') || l.includes('do not') || l.includes("don't") || l.includes('unable') || valLower === 'no'
+          }
+          return l === wantLower || l.startsWith(wantLower) || l.includes(wantLower)
         })
 
         if (!match && group.length > 0) {
           match = group[0]
         }
 
-        if (!match) return null
+        if (!match) return false
 
         const labelEl = (match.id ? document.querySelector(`label[for="${match.id}"]`) : null) || match.closest('label') || match.parentElement
         const wrapperEl = match.closest('.artdeco-radio, [class*="radio" i], .fb-dash-form-element__option') || match.parentElement
@@ -154,19 +153,10 @@ export class FormDOMActions {
         match.dispatchEvent(new Event('change', { bubbles: true }))
         match.dispatchEvent(new Event('input', { bubbles: true }))
 
-        return { id: match.id, labelSel: match.id ? `label[for="${match.id}"]` : null }
+        return group.some(r => r.checked)
       }, { sel: selector, want })
 
-      if (!target) return false
-
-      if (target.labelSel) {
-        const lbl = await page.$(target.labelSel).catch(() => null)
-        if (lbl && (await lbl.isVisible().catch(() => false))) {
-          await lbl.click({ force: true }).catch(() => {})
-        }
-      }
-
-      return true
+      return isSelectedInDom
     } catch {
       return false
     }
@@ -248,16 +238,22 @@ export class FormDOMActions {
         }, value).catch(() => {})
         await this.delay(150, 300)
 
-        // Type characters to trigger typeahead suggestions dropdown
-        await this._typeHuman(page, value)
-        await this.delay(600, 900) 
-
-        // Check if an active suggestion option item is painted to the DOM
+        // Check if setting value programmatically opened suggestions dropdown
         const suggestionSelector = '[role="option"], .basic-typeahead__result, .search-basic-typeahead__results button, div[data-test-typeahead-dropdown] li, div[class*="typeahead"] [role="button"]'
-        const hasSuggestions = await page.evaluate((sel) => {
+        let hasSuggestions = await page.evaluate((sel) => {
           const items = Array.from(document.querySelectorAll(sel)) as HTMLElement[]
           return items.some(i => i.offsetWidth > 0 && i.offsetHeight > 0 && !i.textContent?.toLowerCase().includes('urn:li'))
         }, suggestionSelector).catch(() => false)
+
+        // Only type character-by-character if programmatic fill did not trigger suggestions
+        if (!hasSuggestions) {
+          await this._typeHuman(page, value)
+          await this.delay(400, 600)
+          hasSuggestions = await page.evaluate((sel) => {
+            const items = Array.from(document.querySelectorAll(sel)) as HTMLElement[]
+            return items.some(i => i.offsetWidth > 0 && i.offsetHeight > 0 && !i.textContent?.toLowerCase().includes('urn:li'))
+          }, suggestionSelector).catch(() => false)
+        }
 
         if (hasSuggestions) {
           const suggestionEl = page.locator(suggestionSelector).first()
@@ -301,8 +297,21 @@ export class FormDOMActions {
         await el.blur().catch(() => {})
       }
 
+      // Verify that input actually contains non-empty text
+      const verifiedVal = await el.inputValue().catch(() => '')
+      if (!verifiedVal || verifiedVal.trim().length === 0) {
+        // Reset/clear field if fill attempt resulted in empty value
+        await el.fill('').catch(() => {})
+        return false
+      }
+
       return true
     } catch {
+      // Clean up input on uncaught error
+      try {
+        const el = page.locator(selector).first()
+        await el.fill('').catch(() => {})
+      } catch { /* ignore */ }
       return false
     }
   }
@@ -328,6 +337,65 @@ export class FormDOMActions {
       })
     } catch {
       return false
+    }
+  }
+
+  /** Injects or updates an elegant glassmorphism HUD notification bar directly in the browser page. */
+  static async showInPageNotification(page: Page, title: string, subtitle?: string): Promise<void> {
+    try {
+      if (page.isClosed()) return
+      await page.evaluate(({ title, subtitle }) => {
+        let banner = document.getElementById('jobnavi-agent-banner') as HTMLDivElement
+        if (!banner) {
+          banner = document.createElement('div')
+          banner.id = 'jobnavi-agent-banner'
+          banner.style.position = 'fixed'
+          banner.style.top = '16px'
+          banner.style.right = '16px'
+          banner.style.zIndex = '2147483647'
+          banner.style.background = 'rgba(15, 23, 42, 0.94)'
+          banner.style.backdropFilter = 'blur(12px)'
+          banner.style.border = '1px solid rgba(59, 130, 246, 0.5)'
+          banner.style.borderRadius = '12px'
+          banner.style.padding = '12px 18px'
+          banner.style.color = '#ffffff'
+          banner.style.fontFamily = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+          banner.style.fontSize = '13px'
+          banner.style.boxShadow = '0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 0 15px rgba(59, 130, 246, 0.3)'
+          banner.style.transition = 'all 0.3s ease-in-out'
+          banner.style.pointerEvents = 'none'
+          banner.style.maxWidth = '360px'
+          
+          if (!document.getElementById('jobnavi-agent-style')) {
+            const styleTag = document.createElement('style')
+            styleTag.id = 'jobnavi-agent-style'
+            styleTag.innerHTML = `
+              @keyframes jobnaviPulse {
+                0% { transform: scale(0.95); opacity: 0.8; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.7); }
+                70% { transform: scale(1); opacity: 1; box-shadow: 0 0 0 8px rgba(59, 130, 246, 0); }
+                100% { transform: scale(0.95); opacity: 0.8; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+              }
+            `
+            document.head.appendChild(styleTag)
+          }
+          document.body.appendChild(banner)
+        }
+
+        banner.style.display = 'flex'
+        banner.style.alignItems = 'center'
+        banner.style.gap = '12px'
+
+        banner.innerHTML = `
+          <div style="width: 10px; height: 10px; border-radius: 50%; background: #3b82f6; animation: jobnaviPulse 1.5s infinite; flex-shrink: 0;"></div>
+          <div>
+            <div style="font-weight: 700; color: #60a5fa; letter-spacing: 0.5px; font-size: 11px; text-transform: uppercase; margin-bottom: 2px;">⚡ JobNavi Autonomous AI Agent</div>
+            <div style="font-weight: 600; font-size: 13px; color: #f8fafc; line-height: 1.3;">${title}</div>
+            ${subtitle ? `<div style="font-size: 11px; color: #94a3b8; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 280px;">${subtitle}</div>` : ''}
+          </div>
+        `
+      }, { title, subtitle }).catch(() => {})
+    } catch {
+      /* ignore if page navigating */
     }
   }
 }

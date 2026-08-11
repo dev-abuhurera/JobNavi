@@ -3,30 +3,54 @@
 import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { CheckCircle, XCircle, ExternalLink, Building2, MapPin, Trash2, CheckCircle2, Sparkles, ShieldCheck } from 'lucide-react'
+import { toast } from 'sonner'
+import { JobDetailsSidebar } from '@/components/dashboard/JobDetailsSidebar'
 
 export default function ApprovalsPage() {
   const [jobs, setJobs] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
-  const [toast, setToast] = useState<{ text: string; type: 'success' | 'info' } | null>(null)
   const supabase = createClient()
 
-  const showToast = (text: string, type: 'success' | 'info' = 'success') => {
-    setToast({ text, type }); setTimeout(() => setToast(null), 3000)
-  }
+  const [selectedJob, setSelectedJob] = useState<any | null>(null)
+  const [userProfile, setUserProfile] = useState<any>(null)
+  const [deletingId, setDeletingId] = useState<string | number | null>(null)
 
   const fetchJobs = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { session } } = await supabase.auth.getSession()
+    const user = session?.user
     if (!user) return
-    const { data } = await supabase.from('jobs').select('*').eq('user_id', user.id).eq('status', 'discovered').order('fit_score', { ascending: false })
-    if (data) setJobs(data)
+    const [jobsRes, profileRes] = await Promise.all([
+      supabase.from('jobs').select('*').eq('user_id', user.id).eq('status', 'discovered').order('fit_score', { ascending: false }),
+      supabase.from('profiles').select('profile_data').eq('user_id', user.id).maybeSingle()
+    ])
+    if (jobsRes.data) setJobs(jobsRes.data)
+    if (profileRes.data) setUserProfile(profileRes.data.profile_data || {})
     setLoading(false)
   }, [supabase])
 
   useEffect(() => { fetchJobs() }, [fetchJobs])
 
-  const handleAction = async (job: any, action: 'approved' | 'rejected') => {
-    const { data: { user } } = await supabase.auth.getUser()
+  const openJobModal = (job: any) => {
+    setSelectedJob(job)
+  }
+
+  const handleAction = async (job: any, action: 'approved' | 'rejected', customSkillExp?: Record<string, number>) => {
+    const { data: { session } } = await supabase.auth.getSession()
+    const user = session?.user
     if (!user) return
+
+    const finalSkillExp = customSkillExp || {}
+
+    // Also sync skill experience back to user profile for future auto-fills
+    if (action === 'approved' && Object.keys(finalSkillExp).length > 0) {
+      const mergedExp = { ...(userProfile?.skills_experience || {}), ...finalSkillExp }
+      try {
+        await supabase.from('profiles').upsert({
+          user_id: user.id,
+          profile_data: { ...(userProfile || {}), skills_experience: mergedExp, skills: Object.keys(mergedExp) }
+        }, { onConflict: 'user_id' })
+      } catch {}
+    }
 
     const { error } = await supabase
       .from('jobs')
@@ -35,14 +59,15 @@ export default function ApprovalsPage() {
       .eq('user_id', user.id)
 
     if (error) {
-      showToast('Something went wrong. Try again.', 'info')
+      toast.error('Could not update job status', { description: error.message })
       return
     }
 
     setJobs(jobs.filter(j => j.id !== job.id))
+    if (selectedJob?.id === job.id) setSelectedJob(null)
 
     if (action === 'rejected') {
-      showToast('Job passed.', 'info')
+      toast.info('Job passed', { description: `Passed on "${job.title}" at ${job.company}` })
       return
     }
 
@@ -63,6 +88,7 @@ export default function ApprovalsPage() {
       fit_score: job.fit_score ?? null,
       current_status: 'pending',
       source_url: job.source_url,
+      notes: JSON.stringify({ skills_experience: finalSkillExp }),
     }
 
     let appError;
@@ -75,22 +101,26 @@ export default function ApprovalsPage() {
     }
 
     if (appError) {
-      showToast(`Failed to queue job: ${appError.message}`, 'info')
+      toast.error('Failed to queue job', { description: appError.message })
       return
     }
 
-    showToast('Job queued for automated application!')
+    toast.success('Job Approved & Queued!', {
+      description: `Authorized agent to auto-apply for "${job.title}" at ${job.company}.`,
+    })
   }
 
-  const [deletingId, setDeletingId] = useState<string | number | null>(null)
-
   const confirmDelete = async (id: string | number) => {
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { session } } = await supabase.auth.getSession()
+    const user = session?.user
     if (!user) return
     const { error } = await supabase.from('jobs').delete().eq('id', id).eq('user_id', user.id)
     if (!error) {
       setJobs(prev => prev.filter(j => j.id !== id))
-      showToast('Job record deleted.', 'info')
+      if (selectedJob?.id === id) setSelectedJob(null)
+      toast.info('Job record deleted')
+    } else {
+      toast.error('Failed to delete job', { description: error.message })
     }
     setDeletingId(null)
   }
@@ -110,7 +140,7 @@ export default function ApprovalsPage() {
                 {jobs.length} Pending Review
               </span>
             </div>
-            <p className="text-slate-500 text-sm mt-0.5">Review AI-discovered jobs and authorize your agent to apply.</p>
+            <p className="text-slate-500 text-sm mt-0.5">Click any job card to inspect requirements, complete description, stipend & skill experience before applying.</p>
           </div>
         </div>
       </header>
@@ -141,7 +171,8 @@ export default function ApprovalsPage() {
           {jobs.map(job => (
             <div
               key={job.id}
-              className="group relative bg-white/70 backdrop-blur-3xl border border-white/90 rounded-3xl p-6 shadow-[0_20px_50px_rgba(0,0,0,0.04)] hover:shadow-xl hover:scale-[1.01] transition-all duration-300 flex flex-col justify-between space-y-5"
+              onClick={() => openJobModal(job)}
+              className="group relative bg-white/70 backdrop-blur-3xl border border-white/90 rounded-3xl p-6 shadow-[0_20px_50px_rgba(0,0,0,0.04)] hover:shadow-xl hover:scale-[1.01] cursor-pointer transition-all duration-300 flex flex-col justify-between space-y-5"
             >
               <div>
                 {/* Header Row: Match Pill & Action Icons */}
@@ -156,6 +187,7 @@ export default function ApprovalsPage() {
                         href={job.source_url}
                         target="_blank"
                         rel="noreferrer"
+                        onClick={e => e.stopPropagation()}
                         className="p-1.5 rounded-xl text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 transition-all"
                         title="View Job Post"
                       >
@@ -163,7 +195,7 @@ export default function ApprovalsPage() {
                       </a>
                     )}
                     <button
-                      onClick={() => setDeletingId(job.id)}
+                      onClick={e => { e.stopPropagation(); setDeletingId(job.id) }}
                       className="p-1.5 rounded-xl text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-all"
                       title="Delete Record"
                     >
@@ -189,10 +221,21 @@ export default function ApprovalsPage() {
                   </div>
                 </div>
 
+                {/* Tech Stack Pills preview */}
+                {job.tech_stack && job.tech_stack.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-3">
+                    {job.tech_stack.slice(0, 5).map((t: string) => (
+                      <span key={t} className="font-mono text-[10px] font-bold px-2 py-0.5 rounded-lg bg-emerald-50 text-emerald-800 border border-emerald-200">
+                        {t}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
                 {/* Job Summary */}
                 <div className="bg-white/60 border border-slate-200/70 rounded-2xl p-4 shadow-2xs">
                   <p className="text-xs text-slate-600 line-clamp-3 leading-relaxed">
-                    {job.description || 'Matches your target resume criteria and experience profile.'}
+                    {job.match_reason || job.description || 'Matches your target resume criteria and experience profile.'}
                   </p>
                 </div>
               </div>
@@ -200,22 +243,33 @@ export default function ApprovalsPage() {
               {/* Pass vs Apply CTA Buttons */}
               <div className="grid grid-cols-2 gap-3 pt-2">
                 <button
-                  onClick={() => handleAction(job, 'rejected')}
+                  onClick={e => { e.stopPropagation(); handleAction(job, 'rejected') }}
                   className="py-3 px-4 rounded-2xl text-xs font-bold text-slate-700 hover:text-rose-600 bg-slate-100/80 hover:bg-rose-50 border border-slate-200/80 hover:border-rose-200/80 transition-all active:scale-95 flex items-center justify-center gap-1.5 shadow-2xs"
                 >
                   <XCircle size={16} /> Pass
                 </button>
                 <button
-                  onClick={() => handleAction(job, 'approved')}
+                  onClick={e => { e.stopPropagation(); openJobModal(job) }}
                   className="py-3 px-4 rounded-2xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 transition-all active:scale-95 shadow-md shadow-emerald-600/20 flex items-center justify-center gap-1.5"
                 >
-                  <CheckCircle size={16} /> Apply
+                  <CheckCircle size={16} /> Review & Apply
                 </button>
               </div>
             </div>
           ))}
         </div>
       )}
+
+      {/* JOB DETAILS & STIPEND SIDEBAR */}
+      <JobDetailsSidebar
+        isOpen={!!selectedJob}
+        onClose={() => setSelectedJob(null)}
+        job={selectedJob}
+        onApprove={(j, exp) => handleAction(j, 'approved', exp)}
+        onReject={j => handleAction(j, 'rejected')}
+        onDelete={confirmDelete}
+        userProfile={userProfile}
+      />
 
       {/* Delete Confirmation Modal */}
       {deletingId && (
@@ -243,14 +297,6 @@ export default function ApprovalsPage() {
               </button>
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Floating Glass Toast Notification */}
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 bg-white/95 text-black border border-slate-300/80 backdrop-blur-2xl px-5 py-3.5 rounded-2xl shadow-2xl font-bold text-xs flex items-center gap-2.5 animate-bounce">
-          <CheckCircle size={16} className="text-emerald-600" />
-          <span className="text-black font-bold">{toast.text}</span>
         </div>
       )}
     </div>

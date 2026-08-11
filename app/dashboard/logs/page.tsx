@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Terminal, ShieldCheck, AlertCircle, Info, Trash2, Activity, Sparkles } from 'lucide-react'
+import { toast } from 'sonner'
 
 export default function LogsPage() {
   const [logs, setLogs] = useState<any[]>([])
@@ -10,7 +11,8 @@ export default function LogsPage() {
   const supabase = createClient()
 
   const fetchLogs = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { session } } = await supabase.auth.getSession()
+    const user = session?.user
     if (!user) return
     const { data } = await supabase.from('activity_logs').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50)
     if (data) setLogs(data)
@@ -20,8 +22,8 @@ export default function LogsPage() {
   useEffect(() => {
     let channel: any = null
     fetchLogs()
-    supabase.auth.getUser().then(({ data }) => {
-      const uid = data.user?.id
+    supabase.auth.getSession().then(({ data }) => {
+      const uid = data.session?.user?.id
       if (!uid) return
       const chName = `logs-${uid}-${Math.random().toString(36).substring(2, 8)}`
       const ch = supabase.channel(chName)
@@ -45,6 +47,7 @@ export default function LogsPage() {
     await supabase.from('activity_logs').delete().eq('user_id', user.id)
     setLogs([])
     setShowClearModal(false)
+    toast.info('Session activity logs cleared')
   }
 
   const renderBadge = (lvl: string) => {

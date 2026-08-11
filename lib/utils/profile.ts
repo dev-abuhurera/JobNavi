@@ -27,7 +27,15 @@ export function normalizeProfile(raw: Record<string, any>): NormalizedProfile {
   const pick = (...keys: string[]): string => {
     for (const k of keys) {
       const v = flat[k]
-      if (v !== undefined && v !== null && String(v).trim() !== '') return String(v).trim()
+      if (v !== undefined && v !== null && String(v).trim() !== '') {
+        const str = String(v).trim()
+        const low = str.toLowerCase()
+        // Skip generic placeholder strings like "Candidate", "User", "Test Candidate"
+        if (['candidate', 'candidate name', 'user', 'user name', 'test candidate', 'null', 'undefined'].includes(low)) {
+          continue
+        }
+        return str
+      }
     }
     return ''
   }
@@ -36,16 +44,27 @@ export function normalizeProfile(raw: Record<string, any>): NormalizedProfile {
   const resumeStr = String(flat.resume_text || raw.resume_text || '')
   let extractedEmail = ''
   let extractedPhone = ''
+  let extractedName = ''
+
   if (resumeStr) {
     const emailMatch = resumeStr.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/)
     if (emailMatch) extractedEmail = emailMatch[0]
 
     const phoneMatch = resumeStr.match(/(?:\+?\d{1,3}[-.\s]?)?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}/)
     if (phoneMatch && phoneMatch[0].length >= 7) extractedPhone = phoneMatch[0]
+
+    // Extract candidate name from top of resume text (e.g. "MUHAMMAD ABUHURERA")
+    const nameLineMatch = resumeStr.split('\n')[0]?.trim()
+    if (nameLineMatch) {
+      const cleanNameLine = nameLineMatch.split(/\||-|–|—|\bFull-Stack\b|\bSoftware\b|\bDeveloper\b/i)[0]?.trim()
+      if (cleanNameLine && cleanNameLine.length >= 3 && cleanNameLine.length <= 40 && !cleanNameLine.includes('@')) {
+        extractedName = cleanNameLine
+      }
+    }
   }
 
   const profile: NormalizedProfile = {
-    name: pick('name', 'full_name', 'fullName', 'candidate_name', 'candidateName', 'display_name'),
+    name: pick('full_name', 'fullName', 'display_name', 'name', 'candidate_name', 'candidateName') || extractedName,
     email: pick('email', 'email_address', 'emailAddress', 'contact_email', 'user_email') || extractedEmail,
     phone: pick(
       'phone', 'phone_number', 'phoneNumber', 'mobile', 'mobile_number',

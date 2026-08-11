@@ -143,3 +143,35 @@ export async function batchFilterJobsByProfile(
   
   return filterJobsByProfile(jobs, profileText, negativeKeywords)
 }
+
+/**
+ * Executes server-side Supabase pgvector RPC search to match database jobs against stored candidate resume_embedding.
+ */
+export async function matchJobsInDatabase(
+  supabase: any,
+  userId: string,
+  threshold = 0.25,
+  limit = 50
+): Promise<any[]> {
+  try {
+    const { data, error } = await supabase.rpc('match_jobs_for_candidate', {
+      p_user_id: userId,
+      p_threshold: threshold,
+      p_limit: limit,
+    })
+
+    if (error) {
+      console.warn('[Matching] Supabase pgvector RPC search failed:', error.message)
+      return []
+    }
+
+    return (data || []).map((j: any) => ({
+      ...j,
+      fit_score: j.fit_score ?? Math.round((j.similarity || 0) * 100),
+    }))
+  } catch (err: any) {
+    console.error('[Matching] Database vector matching error:', err.message)
+    return []
+  }
+}
+

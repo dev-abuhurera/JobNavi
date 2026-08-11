@@ -37,7 +37,7 @@ export async function POST(req: Request) {
   activeSessions.add(key)
 
   const cfg = validateConfig()
-  const automation = new PortalAutomationHybrid(serviceClient, cfg.groqApiKey)
+  const automation = new PortalAutomationHybrid(serviceClient)
 
   automation.startLoginSession(userId, portal)
     .then(success => {

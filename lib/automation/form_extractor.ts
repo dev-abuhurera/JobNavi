@@ -66,15 +66,16 @@ export class FormExtractor {
             if (!rLabel) rLabel = gr.value || ('Option ' + (gIdx + 1));
 
             options.push(rLabel.replace(/\\s+/g, ' ').trim());
-            if (gIdx === 0 && gr.id) {
-              firstRadioSelector = '[id="' + gr.id + '"]';
-            } else if (gIdx === 0 && gr.name) {
-              firstRadioSelector = 'input[type="radio"][name="' + gr.name + '"]';
+            
+            // Tag radio input with unique dataset attribute for 100% reliable Playwright selection
+            gr.setAttribute('data-jobnavi-radio-idx', rIdx + '-' + gIdx);
+            if (gIdx === 0) {
+              firstRadioSelector = '[data-jobnavi-radio-idx="' + rIdx + '-0"]';
             }
           }
 
-          if (!firstRadioSelector && groupRadios[0] && groupRadios[0].id) {
-            firstRadioSelector = '[id="' + groupRadios[0].id + '"]';
+          if (!firstRadioSelector && groupRadios[0]) {
+            firstRadioSelector = '[data-jobnavi-radio-idx="' + rIdx + '-0"]';
           }
 
           result.push({
@@ -119,13 +120,9 @@ export class FormExtractor {
             continue;
           }
 
-          var selector = input.id ? ('[id="' + input.id + '"]') : (input.name ? ('[name="' + input.name + '"]') : null);
-          if (!selector) {
-            var tag = el.tagName.toLowerCase();
-            var allSameTag = Array.from(modal.querySelectorAll(tag));
-            var idx = allSameTag.indexOf(el);
-            selector = tag + ':nth-of-type(' + (idx + 1) + ')';
-          }
+          // Tag input element with unique dataset attribute for 100% reliable Playwright selection
+          el.setAttribute('data-jobnavi-field-idx', '' + j);
+          var selector = '[data-jobnavi-field-idx="' + j + '"]';
 
           var rawLabel = '';
           if (input.id) {

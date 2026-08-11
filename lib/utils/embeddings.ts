@@ -17,7 +17,8 @@ async function getExtractor() {
   loadingPromise = (async () => {
     try {
       console.log('[Embeddings] Loading transformer model lazily: all-MiniLM-L6-v2...');
-      const { pipeline } = await import('@xenova/transformers');
+      const { pipeline, env } = await import('@xenova/transformers');
+      env.allowLocalModels = false;
       extractor = await pipeline(
         'feature-extraction',
         'Xenova/all-MiniLM-L6-v2'

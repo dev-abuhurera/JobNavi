@@ -1,8 +1,9 @@
 import { PortalAutomationHybrid } from '../lib/automation/portal_automation_hybrid'
 import { PlaywrightDiscovery } from '../lib/automation/playwright_discovery'
 import { batchFilterJobsByProfile, UserProfile } from '../lib/utils/matching'
+import { getEmbedding } from '../lib/utils/embeddings'
 import { isRealUrl, isRealJobTitle, getSourceName, classifyApplicationType } from '../lib/utils/url'
-import { GroqRotatingClient } from '../lib/groq-client'
+import { OllamaClient } from '../lib/ollama-client'
 import { validateConfig } from '../lib/config'
 import { logger } from '../lib/logger'
 import { z } from 'zod'
@@ -83,8 +84,18 @@ async function getUserProfile(userId: string): Promise<UserProfile> {
   }
 }
 
+async function isTaskCancelled(taskId: string): Promise<boolean> {
+  if (!taskId) return false
+  const { data } = await supabase
+    .from('discovery_tasks')
+    .select('status')
+    .eq('id', taskId)
+    .maybeSingle()
+  return !data || data.status === 'cancelled' || data.status === 'interrupted'
+}
+
 // ── DISCOVERY PASS (PLAYWRIGHT DIRECT) ──
-async function discoverJobs(keywords: string[], location: string, profile: UserProfile): Promise<any[]> {
+async function discoverJobs(keywords: string[], location: string, profile: UserProfile, taskId?: string): Promise<any[]> {
   logger.info('[Discovery]', `Starting Playwright Direct LinkedIn Discovery for keywords: [${keywords.join(', ')}] in "${location}"`)
   
   const existingJobUrls = new Set<string>()
@@ -98,55 +109,75 @@ async function discoverJobs(keywords: string[], location: string, profile: UserP
     })
   }
 
+  const cancelChecker = taskId ? () => isTaskCancelled(taskId) : undefined
+
   const discoveredRaw = await PlaywrightDiscovery.discoverJobs(
     keywords,
     location,
     existingJobUrls,
-    existingJobKeys
+    existingJobKeys,
+    cancelChecker
   )
 
-  if (discoveredRaw.length === 0) {
-    logger.info('[Discovery]', 'Playwright discovery found 0 new Easy Apply jobs')
+  if (discoveredRaw.length === 0 || (taskId && await isTaskCancelled(taskId))) {
+    logger.info('[Discovery]', 'Playwright discovery stopped or 0 new Easy Apply jobs found')
     return []
   }
 
-  // Stage 1 Vector Filtering
+  // Fast Vector Filtering & Real Job Title Verification
+  if (taskId && await isTaskCancelled(taskId)) return []
   const stage1Matched = await batchFilterJobsByProfile(discoveredRaw, profile)
-  if (stage1Matched.length === 0) {
-    logger.info('[Discovery]', 'Stage 1 similarity matching filtered out all discovered jobs')
+  if (stage1Matched.length === 0 || (taskId && await isTaskCancelled(taskId))) {
+    logger.info('[Discovery]', 'Vector similarity matching completed or stopped')
     return []
   }
 
-  // Stage 2 LangChain LLM Fit Evaluation
-  const finalMatched = await evaluateJobsWithLLM(stage1Matched, profile)
-  const candidateJobs = finalMatched.filter(j => isRealJobTitle(j.title))
-
-  logger.info('[Discovery]', `${candidateJobs.length} verified 24h Easy Apply jobs ready to save`)
+  const candidateJobs = stage1Matched.filter(j => isRealJobTitle(j.title))
+  logger.info('[Discovery]', `✅ Fast Discovery complete: ${candidateJobs.length} verified 24h Easy Apply jobs ready to save`)
   return candidateJobs
 }
 
 const ZodJobMatchSchema = z.object({
-  fit_score: z.number().min(0).max(100).describe('Integer score between 0 and 100'),
-  reason: z.string().describe('Short explanation of candidate fit'),
-  tech_stack: z.array(z.string()).describe('List of main technologies required'),
-  is_match: z.boolean().describe('True if candidate is a good match'),
+  fit_score: z.coerce.number().min(0).max(100).catch(75),
+  reason: z.preprocess(v => String(v ?? 'Matching candidate skills'), z.string()).catch('Matching candidate skills'),
+  tech_stack: z.preprocess(v => Array.isArray(v) ? v.map(String) : [], z.array(z.string())).catch([]),
+  is_match: z.preprocess(v => typeof v === 'boolean' ? v : String(v).toLowerCase() !== 'false', z.boolean()).catch(true),
 })
 
-async function evaluateJobsWithLLM(jobs: any[], profile: UserProfile): Promise<any[]> {
-  if (!cfg.groqApiKey || jobs.length === 0) return jobs
+async function evaluateJobsWithLLM(jobs: any[], profile: UserProfile, taskId?: string): Promise<any[]> {
+  if (jobs.length === 0) return jobs
 
-  const client = new GroqRotatingClient(cfg.groqApiKey)
+  const client = new OllamaClient()
   const evaluated: any[] = []
+  // Evaluate top 10 candidates for fast discovery response
+  const candidates = jobs.slice(0, 10)
 
-  logger.info('[Discovery]', `Running Stage 2 LangChain LLM evaluation on top ${Math.min(jobs.length, 50)} candidate jobs...`)
+  logger.info('[Discovery]', `Running Stage 2 combined LLM evaluation & skill extraction on top ${candidates.length} candidate jobs...`)
 
-  for (const job of jobs.slice(0, 50)) {
-    try {
-      const profileSummary = profile.dense_summary || profile.experience_summary || (profile.resume_text || '').slice(0, 500)
-      
-      const systemPrompt = `You are an expert AI job search evaluator. Compare the candidate profile with the job opportunity and output a structured match decision.`
+  const BATCH_SIZE = 3
+  for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+    if (taskId && await isTaskCancelled(taskId)) {
+      logger.info('[Discovery]', 'LLM evaluation cancelled by user.')
+      break
+    }
 
-      const userPrompt = `CANDIDATE PROFILE:
+    const batch = candidates.slice(i, i + BATCH_SIZE)
+    const evalPromise = Promise.all(
+      batch.map(async (job) => {
+        try {
+          const profileSummary = profile.dense_summary || profile.experience_summary || (profile.resume_text || '').slice(0, 500)
+          
+          const systemPrompt = `You are an expert AI job search evaluator. Compare the candidate profile with the job opportunity, extract all required tech stack skills mentioned in the job description, and output a structured match decision.
+
+You MUST respond ONLY with a JSON object in this exact format:
+{
+  "fit_score": 85,
+  "reason": "Strong match with candidate skills and experience",
+  "tech_stack": ["AWS", "Node.js", "Python", "React"],
+  "is_match": true
+}`
+
+          const userPrompt = `CANDIDATE PROFILE:
 - Desired Roles: ${profile.desired_roles?.join(', ') || 'Software Engineer'}
 - Skills: ${profile.skills?.slice(0, 12).join(', ') || 'Software Development'}
 - Resume Summary: "${profileSummary}"
@@ -154,29 +185,44 @@ async function evaluateJobsWithLLM(jobs: any[], profile: UserProfile): Promise<a
 JOB OPPORTUNITY:
 - Title: "${job.title}"
 - Company: "${job.company}"
-- Description: "${job.description}"`
+- Description: "${(job.description || '').slice(0, 1500)}"`
 
-      const res = await client.chatStructured<z.infer<typeof ZodJobMatchSchema>>(
-        [
-          ['system', systemPrompt],
-          ['human', userPrompt],
-        ],
-        ZodJobMatchSchema
-      )
+          const res = await client.chatStructured<z.infer<typeof ZodJobMatchSchema>>(
+            [
+              ['system', systemPrompt],
+              ['human', userPrompt],
+            ],
+            ZodJobMatchSchema
+          )
 
-      if (res && typeof res.fit_score === 'number' && res.fit_score >= 40 && res.is_match !== false) {
-        evaluated.push({
-          ...job,
-          fit_score: res.fit_score,
-          tech_stack: res.tech_stack || job.tech_stack || [],
-          match_reason: res.reason || '',
-        })
-      } else {
-        logger.info('[Discovery]', `LangChain Stage 2 rejected "${job.title}" (Score: ${res?.fit_score || 0}): ${res?.reason || 'Low relevance'}`)
+          if (res && typeof res.fit_score === 'number' && res.fit_score >= 40 && res.is_match !== false) {
+            return {
+              ...job,
+              fit_score: res.fit_score,
+              tech_stack: res.tech_stack?.length ? res.tech_stack : (job.tech_stack || []),
+              match_reason: res.reason || '',
+            }
+          } else {
+            logger.info('[Discovery]', `Stage 2 rejected "${job.title}" (Score: ${res?.fit_score || 0}): ${res?.reason || 'Low relevance'}`)
+            return null
+          }
+        } catch (err: any) {
+          logger.warn('[Discovery]', `Stage 2 evaluation skipped for "${job.title}": ${err.message}. Retaining Stage 1 score.`)
+          return job
+        }
+      })
+    )
+
+    const timeoutPromise = new Promise<null>(resolve => setTimeout(() => resolve(null), 3000))
+    const batchResults = await Promise.race([evalPromise, timeoutPromise])
+
+    if (!batchResults) {
+      logger.info('[Discovery]', `Stage 2 LLM evaluation timed out (>3s). Retaining Stage 1 vector match scores for ${batch.length} jobs.`)
+      evaluated.push(...batch)
+    } else {
+      for (const r of batchResults) {
+        if (r) evaluated.push(r)
       }
-    } catch (err: any) {
-      logger.warn('[Discovery]', `LangChain Stage 2 evaluation failed for "${job.title}": ${err.message}. Retaining Stage 1 score.`)
-      evaluated.push(job)
     }
   }
 
@@ -194,8 +240,16 @@ async function saveJobs(jobs: any[], userId: string) {
     return true
   })
 
-  const records = clean.map(job => {
-    return {
+  for (const job of clean) {
+    let embedding: number[] | null = null
+    try {
+      const jobText = `${job.title || ''} ${job.company || ''} ${(job.description || '').slice(0, 1000)}`
+      embedding = await getEmbedding(jobText)
+    } catch (e: any) {
+      logger.warn('[Worker]', `Failed to generate vector embedding for "${job.title}": ${e.message}`)
+    }
+
+    const record: Record<string, any> = {
       user_id: userId,
       title: job.title,
       company: job.company || 'Unknown',
@@ -208,11 +262,21 @@ async function saveJobs(jobs: any[], userId: string) {
       status: 'discovered',
       application_type: classifyApplicationType(job.source_url)
     }
-  })
 
-  for (const record of records) {
+    if (embedding) {
+      record.embedding = embedding
+    }
+
     try {
-      const { error } = await supabase.from('jobs').insert(record)
+      let { error } = await supabase.from('jobs').insert(record)
+      
+      // Fallback: If Supabase schema does not have the 'embedding' column yet (PGRST204), retry without it
+      if (error && error.code === 'PGRST204' && record.embedding) {
+        delete record.embedding
+        const retry = await supabase.from('jobs').insert(record)
+        error = retry.error
+      }
+
       if (!error) {
         savedCount++
       } else if (error.code === '23505') {
@@ -230,18 +294,72 @@ async function saveJobs(jobs: any[], userId: string) {
   logger.info('[Worker]', `Job saving step complete: ${savedCount} saved, ${skippedCount} skipped, ${errorCount} errors.`)
 }
 
+let currentTaskId: string | null = null
+let currentAppId: string | null = null
+
+async function cleanupStaleTasks() {
+  try {
+    const { data: staleTasks } = await supabase
+      .from('discovery_tasks')
+      .select('id')
+      .in('status', ['pending', 'queued', 'processing', 'running'])
+
+    if (staleTasks && staleTasks.length > 0) {
+      for (const t of staleTasks) {
+        await supabase
+          .from('discovery_tasks')
+          .update({ status: 'interrupted', error_message: 'Worker restarted or closed' })
+          .eq('id', t.id)
+      }
+      logger.info('[Worker]', `Updated ${staleTasks.length} interrupted discovery tasks from previous session.`)
+    }
+
+    const { data: staleApps } = await supabase
+      .from('applications')
+      .select('id')
+      .in('current_status', ['pending', 'queued', 'processing'])
+
+    if (staleApps && staleApps.length > 0) {
+      for (const a of staleApps) {
+        await supabase
+          .from('applications')
+          .update({ current_status: 'interrupted', notes: 'Worker restarted or closed' })
+          .eq('id', a.id)
+      }
+      logger.info('[Worker]', `Updated ${staleApps.length} interrupted applications from previous session.`)
+    }
+  } catch (e: any) {
+    logger.warn('[Worker]', 'Stale task cleanup warning:', e.message)
+  }
+}
+
+async function handleShutdown(signal: string) {
+  logger.info('[Worker]', `Received ${signal}. Marking active tasks as interrupted...`)
+  if (currentTaskId) {
+    await supabase.from('discovery_tasks').update({ status: 'interrupted', error_message: `Interrupted by application shutdown (${signal})` }).eq('id', currentTaskId)
+  }
+  if (currentAppId) {
+    await supabase.from('applications').update({ current_status: 'interrupted', notes: `Interrupted by application shutdown (${signal})` }).eq('id', currentAppId)
+  }
+  process.exit(0)
+}
+
+process.on('SIGINT', () => handleShutdown('SIGINT'))
+process.on('SIGTERM', () => handleShutdown('SIGTERM'))
+
 // ── ON-DEMAND FRONTEND DISCOVERY TASK LISTENER ──
 async function processPendingDiscoveryTasks() {
   const { data: pendingTasks } = await supabase
     .from('discovery_tasks')
     .select('*')
-    .eq('status', 'pending')
+    .or('status.eq.pending,status.eq.queued')
     .order('created_at', { ascending: true })
     .limit(1)
 
   if (!pendingTasks || pendingTasks.length === 0) return
 
   for (const task of pendingTasks) {
+    currentTaskId = task.id
     try {
       await supabase.from('discovery_tasks').update({ status: 'processing' }).eq('id', task.id)
       await log(task.user_id, `🔍 Frontend triggered discovery task: "${task.keywords?.join(', ')}" in "${task.location}"`, 'info')
@@ -250,7 +368,13 @@ async function processPendingDiscoveryTasks() {
       const keywords = (task.keywords && task.keywords.length) ? task.keywords : profile.desired_roles
       const location = task.location || profile.city || 'Remote'
 
-      const discovered = await discoverJobs(keywords, location, profile)
+      const discovered = await discoverJobs(keywords, location, profile, task.id)
+      if (await isTaskCancelled(task.id)) {
+        logger.info('[Worker]', `Discovery task ${task.id} was cancelled by user. Aborting.`)
+        await log(task.user_id, `⛔ Discovery mission cancelled by user.`, 'info')
+        return
+      }
+
       if (discovered.length > 0) {
         await saveJobs(discovered, task.user_id)
         await log(task.user_id, `✅ Discovery complete: Saved ${discovered.length} Easy Apply jobs to queue.`, 'info')
@@ -262,6 +386,8 @@ async function processPendingDiscoveryTasks() {
     } catch (err: any) {
       logger.error('[Worker]', `Discovery task ${task.id} failed:`, err.message)
       await supabase.from('discovery_tasks').update({ status: 'failed', error_message: err.message }).eq('id', task.id)
+    } finally {
+      currentTaskId = null
     }
   }
 }
@@ -283,6 +409,7 @@ async function processPendingApplications() {
   if (!pending || pending.length === 0) return
 
   for (const app of pending) {
+    currentAppId = app.id
     try {
       // Mark as processing immediately so frontend reflects active status
       await supabase.from('applications').update({ current_status: 'processing' }).eq('id', app.id)
@@ -322,7 +449,7 @@ async function processPendingApplications() {
 
       await log(app.user_id, `🤖 Frontend requested auto-apply for "${title}" at "${company}"`, 'info')
 
-      const automation = new PortalAutomationHybrid(supabase, cfg.groqApiKey)
+      const automation = new PortalAutomationHybrid(supabase)
       const portal = job?.source || app.source || 'linkedin'
       const isHeadless = process.env.HEADLESS === 'true'
       await automation.init(app.user_id, portal, isHeadless)
@@ -342,6 +469,9 @@ async function processPendingApplications() {
           current_status: 'closed',
           notes: 'Job posting is no longer taking applications.'
         }).eq('id', app.id)
+        if (targetJobId) {
+          try { await supabase.from('jobs').update({ status: 'closed' }).eq('id', targetJobId) } catch {}
+        }
         await log(app.user_id, `⚠️ Job closed for "${title}" at "${company}".`, 'warn')
       } else {
         await supabase.from('applications').update({
@@ -356,6 +486,8 @@ async function processPendingApplications() {
         current_status: 'failed',
         notes: `Application failed: ${err.message}`
       }).eq('id', app.id)
+    } finally {
+      currentAppId = null
     }
   }
 }
@@ -363,6 +495,7 @@ async function processPendingApplications() {
 // ── MAIN WORKER POLLING LOOP ──
 async function mainWorkerLoop() {
   logger.info('[Worker]', 'Agent Worker started. Polling for Frontend On-Demand tasks & applications every 5s...')
+  await cleanupStaleTasks()
   while (true) {
     try {
       // 1. Process explicit user discovery tasks triggered from Frontend Dashboard

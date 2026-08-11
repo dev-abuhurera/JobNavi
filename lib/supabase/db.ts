@@ -62,15 +62,25 @@ export async function deleteAllJobs(userId: string) {
 
 export async function getApplications(userId: string) {
   const supabase = createClient()
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from('applications')
-    .select('*')
+    .select('*, jobs(*)')
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
 
   if (error) {
-    console.error('DB error (getApplications):', error)
-    return []
+    // Fallback if foreign key relationship between applications and jobs is missing in DB schema
+    const fallback = await supabase
+      .from('applications')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false })
+
+    if (fallback.error) {
+      console.error('DB error (getApplications):', fallback.error)
+      return []
+    }
+    data = fallback.data
   }
   return data || []
 }

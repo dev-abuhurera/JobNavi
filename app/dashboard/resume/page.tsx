@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { FileText, Upload, CheckCircle, FileUp, Loader2, Sparkles, ShieldCheck, CheckCircle2, Sliders, AlertCircle } from 'lucide-react'
+import { toast } from 'sonner'
 
 const PREF_FIELDS = [
   { key: 'requires_visa_sponsorship', label: 'Require visa sponsorship?', type: 'select', options: ['No', 'Yes'] },
@@ -11,7 +12,6 @@ const PREF_FIELDS = [
   { key: 'city', label: 'Location / City', type: 'text', placeholder: 'Islamabad' },
   { key: 'expected_salary', label: 'Expected annual salary ($)', type: 'text', placeholder: '80000' },
   { key: 'hourly_rate', label: 'Expected hourly rate ($ / hr)', type: 'text', placeholder: '35' },
-  { key: 'years_of_experience', label: 'Years of experience', type: 'text', placeholder: '3' },
   { key: 'notice_period', label: 'Notice period', type: 'text', placeholder: '2 weeks' },
   { key: 'gender', label: 'Gender (optional)', type: 'text', placeholder: 'Prefer not to say' },
   { key: 'ethnicity', label: 'Ethnicity (optional)', type: 'text', placeholder: 'Prefer not to say' },
@@ -30,10 +30,19 @@ export default function ResumeHubPage() {
   const notify = (type: 'success' | 'info' | 'error', message: string) => {
     setNote({ type, message })
     setTimeout(() => setNote(null), 5000)
+
+    if (type === 'success') {
+      toast.success('Resume Hub', { description: message })
+    } else if (type === 'error') {
+      toast.error('Resume Hub', { description: message })
+    } else {
+      toast.info('Resume Hub', { description: message })
+    }
   }
 
   const fetchProfile = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { session } } = await supabase.auth.getSession()
+    const user = session?.user
     if (!user) return
     const { data } = await supabase.from('profiles').select('*').eq('user_id', user.id).maybeSingle()
     if (data) setProfile(data)

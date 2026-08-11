@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
-import { Search, MapPin, Loader2, Zap, Plus, Clock, Sparkles, Compass, CheckCircle2, AlertCircle } from 'lucide-react'
+import { Search, MapPin, Loader2, Zap, Plus, Clock, Sparkles, Compass, CheckCircle2, AlertCircle, Trash2, Square } from 'lucide-react'
+import { toast } from 'sonner'
 
 export default function DiscoveryPage() {
   const [keywords, setKeywords] = useState('')
@@ -22,7 +23,8 @@ export default function DiscoveryPage() {
   ])
 
   const loadData = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { session } } = await supabase.auth.getSession()
+    const user = session?.user
     if (!user) return setMissing(['Resume'])
 
     const [profileRes, tasksRes] = await Promise.all([
@@ -48,8 +50,8 @@ export default function DiscoveryPage() {
     loadData()
     window.addEventListener('focus', loadData)
 
-    supabase.auth.getUser().then(({ data }) => {
-      const uid = data.user?.id
+    supabase.auth.getSession().then(({ data }) => {
+      const uid = data.session?.user?.id
       if (!uid) return
       const chName = `tasks-${uid}-${Math.random().toString(36).substring(2, 8)}`
       const ch = supabase.channel(chName)
@@ -71,17 +73,25 @@ export default function DiscoveryPage() {
 
   const start = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!keywords.trim() || !ready) return
+    if (!keywords.trim() || !ready) {
+      if (!ready) {
+        toast.warning('Complete Profile Required', {
+          description: 'Please upload your resume and list your key skills in the Resume Hub first.',
+        })
+      }
+      return
+    }
 
     setLoading(true)
     setError(null)
+    const kwList = keywords.split(',').map(k => k.trim()).filter(Boolean)
 
     try {
       const res = await fetch('/api/discover', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          keywords: keywords.split(',').map(k => k.trim()).filter(Boolean),
+          keywords: kwList,
           location: location.trim() || 'Remote',
         }),
       })
@@ -89,14 +99,21 @@ export default function DiscoveryPage() {
       const body = await res.json().catch(() => ({}))
 
       if (!res.ok) {
-        setError(body.message || body.error || 'Could not start search mission.')
+        const errMsg = body.message || body.error || 'Could not start search mission.'
+        setError(errMsg)
+        toast.error('Search Mission Error', { description: errMsg })
         if (body.missing) setMissing(body.missing)
         return
       }
 
+      toast.success('AI Discovery Mission Launched!', {
+        description: `Searching Easy Apply jobs for "${kwList.join(', ')}" in ${location.trim() || 'Remote'}...`,
+      })
       setKeywords('')
     } catch {
-      setError('Could not start search mission. Please check your connection.')
+      const errMsg = 'Could not start search mission. Please check your connection.'
+      setError(errMsg)
+      toast.error('Network Error', { description: errMsg })
     } finally {
       setLoading(false)
     }
@@ -110,7 +127,7 @@ export default function DiscoveryPage() {
         </span>
       )
     }
-    if (status === 'running') {
+    if (status === 'running' || status === 'processing') {
       return (
         <span className="inline-flex items-center gap-1.5 font-mono text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-amber-500/10 text-amber-700 border border-amber-200 backdrop-blur-md">
           <Loader2 size={12} className="animate-spin text-amber-600" /> Searching...
@@ -124,6 +141,13 @@ export default function DiscoveryPage() {
         </span>
       )
     }
+    if (status === 'interrupted' || status === 'cancelled') {
+      return (
+        <span className="inline-flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-slate-200/80 text-slate-700 border border-slate-300">
+          <AlertCircle size={12} className="text-slate-500" /> Interrupted
+        </span>
+      )
+    }
     return (
       <span className="inline-flex items-center gap-1 font-mono text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
         Queued
@@ -131,7 +155,16 @@ export default function DiscoveryPage() {
     )
   }
 
-  const activeTask = tasks.find(t => t.status === 'running' || t.status === 'queued') || (loading ? { keywords, location, status: 'running' } : null)
+  const deleteTask = async (taskId: string) => {
+    try {
+      await supabase.from('discovery_tasks').update({ status: 'cancelled' }).eq('id', taskId)
+      await supabase.from('discovery_tasks').delete().eq('id', taskId)
+      setTasks(prev => prev.filter(t => t.id !== taskId))
+      toast.success('Search mission stopped and removed')
+    } catch {
+      toast.error('Failed to stop mission')
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -144,38 +177,6 @@ export default function DiscoveryPage() {
           <h1 className="font-display text-3xl font-bold tracking-tight text-slate-900">Discover Jobs</h1>
         </div>
       </header>
-
-      {/* Active Search Mission Radar Card */}
-      {activeTask && (
-        <div className="bg-gradient-to-r from-slate-900 via-slate-800 to-teal-950 text-white rounded-3xl p-6 shadow-xl border border-teal-500/30 relative overflow-hidden">
-          <div className="absolute top-0 right-0 -mr-10 -mt-10 w-48 h-48 bg-emerald-500/20 rounded-full blur-3xl pointer-events-none" />
-          <div className="flex flex-col sm:flex-row items-center gap-5 relative z-10">
-            {/* Animated Radar Search Circle */}
-            <div className="relative shrink-0 flex items-center justify-center w-16 h-16">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-40"></span>
-              <span className="animate-spin absolute inline-flex h-14 w-14 rounded-full border-2 border-emerald-400 border-t-transparent"></span>
-              <div className="w-12 h-12 rounded-full bg-emerald-500 text-slate-950 flex items-center justify-center shadow-lg shadow-emerald-500/40">
-                <Loader2 size={24} className="animate-spin" />
-              </div>
-            </div>
-
-            <div className="flex-1 text-center sm:text-left space-y-1">
-              <div className="flex items-center justify-center sm:justify-start gap-2">
-                <span className="font-mono text-[10px] font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 inline-flex items-center gap-1.5">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  AI Search Engine Active
-                </span>
-              </div>
-              <h3 className="font-display font-bold text-xl text-white">
-                Searching matching jobs...
-              </h3>
-              <p className="text-xs text-slate-300">
-                Scanning portals for <span className="font-semibold text-emerald-300">{Array.isArray(activeTask.keywords) ? activeTask.keywords.join(', ') : activeTask.keywords}</span> in <span className="font-semibold text-emerald-300">{activeTask.location || 'Remote'}</span>
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Main 2-Column Glass Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -323,9 +324,28 @@ export default function DiscoveryPage() {
                 >
                   <div className="flex items-center justify-between">
                     {statusBadge(t.status)}
-                    <span className="font-mono text-[11px] font-medium text-slate-400">
-                      {new Date(t.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[11px] font-medium text-slate-400">
+                        {new Date(t.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                      {t.status === 'running' || t.status === 'processing' ? (
+                        <button
+                          onClick={() => deleteTask(t.id)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-xl text-[11px] font-bold bg-rose-50 text-rose-700 border border-rose-200/90 hover:bg-rose-100 hover:border-rose-300 transition-all shadow-2xs"
+                          title="Stop & cancel active search mission"
+                        >
+                          <Square size={10} fill="currentColor" /> Stop Search
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => deleteTask(t.id)}
+                          className="text-slate-400 hover:text-rose-600 transition-colors p-0.5 rounded-lg hover:bg-rose-50"
+                          title="Remove mission"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      )}
+                    </div>
                   </div>
 
                   <div>

@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/client'
 import { useRouter } from 'next/navigation'
 import { Compass, Mail, Lock, Loader2, ArrowRight } from 'lucide-react'
 import Link from 'next/link'
+import { toast } from 'sonner'
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -17,11 +18,20 @@ export default function LoginPage() {
   const login = async (e: React.FormEvent) => {
     e.preventDefault(); setLoading(true); setError(null)
     const { error } = await supabase.auth.signInWithPassword({ email, password })
-    if (error) { setError(error.message); setLoading(false) } else { router.refresh(); router.push('/dashboard') }
+    if (error) {
+      setError(error.message)
+      toast.error('Sign In Failed', { description: error.message })
+      setLoading(false)
+    } else {
+      toast.success('Welcome Back!', { description: 'Redirecting to your dashboard...' })
+      router.refresh()
+      router.push('/dashboard')
+    }
   }
 
   const oauth = async (provider: 'google' | 'github') => {
     setLoading(true)
+    toast.info(`Connecting with ${provider === 'google' ? 'Google' : 'GitHub'}...`)
     await supabase.auth.signOut()
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
@@ -30,7 +40,11 @@ export default function LoginPage() {
         queryParams: { prompt: 'select_account' },
       },
     })
-    if (error) { setError(error.message); setLoading(false) }
+    if (error) {
+      setError(error.message)
+      toast.error(`OAuth Error`, { description: error.message })
+      setLoading(false)
+    }
   }
 
   return (

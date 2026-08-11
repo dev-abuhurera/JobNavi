@@ -3,17 +3,25 @@
 import { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Target, ExternalLink, Trash2, Search, CheckCircle2, Calendar, Sparkles, Building2 } from 'lucide-react'
+import { toast } from 'sonner'
+import { JobDetailsSidebar } from '@/components/dashboard/JobDetailsSidebar'
 
 export default function ApplicationsPage() {
   const [apps, setApps] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
+  const [selectedJob, setSelectedJob] = useState<any | null>(null)
   const supabase = createClient()
 
   const fetchApps = useCallback(async () => {
-    const { data: { user } } = await supabase.auth.getUser()
+    const { data: { session } } = await supabase.auth.getSession()
+    const user = session?.user
     if (!user) return
-    const { data } = await supabase.from('applications').select('*').eq('user_id', user.id).order('created_at', { ascending: false })
+    let { data, error } = await supabase.from('applications').select('*, jobs(*)').eq('user_id', user.id).order('created_at', { ascending: false })
+    if (error) {
+      const fallback = await supabase.from('applications').select('*').eq('user_id', user.id).order('created_at', { ascending: false })
+      data = fallback.data
+    }
     if (data) setApps(data)
     setLoading(false)
   }, [supabase])
@@ -23,8 +31,8 @@ export default function ApplicationsPage() {
     fetchApps()
     window.addEventListener('focus', fetchApps)
 
-    supabase.auth.getUser().then(({ data }) => {
-      const uid = data.user?.id
+    supabase.auth.getSession().then(({ data }) => {
+      const uid = data.session?.user?.id
       if (!uid) return
       const ch = supabase.channel(`apps-${uid}-${Math.random().toString(36).substring(2, 6)}`)
       ch.on('postgres_changes',
@@ -43,11 +51,21 @@ export default function ApplicationsPage() {
 
   const [deletingId, setDeletingId] = useState<number | null>(null)
 
-  const confirmDelete = async (id: number) => {
+  const confirmDelete = async (id: number | string) => {
+    const numId = Number(id)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-    const { error } = await supabase.from('applications').delete().eq('id', id).eq('user_id', user.id)
-    if (!error) setApps(prev => prev.filter(a => a.id !== id))
+    const appToDelete = apps.find(a => a.id === numId)
+    const { error } = await supabase.from('applications').delete().eq('id', numId).eq('user_id', user.id)
+    if (!error) {
+      setApps(prev => prev.filter(a => a.id !== numId))
+      if (selectedJob?.id === numId) setSelectedJob(null)
+      toast.info('Application Record Deleted', {
+        description: appToDelete ? `Removed ${appToDelete.job_title} at ${appToDelete.company}` : undefined,
+      })
+    } else {
+      toast.error('Failed to Delete Application', { description: error.message })
+    }
     setDeletingId(null)
   }
 
@@ -55,6 +73,22 @@ export default function ApplicationsPage() {
     (a.company || '').toLowerCase().includes(q.toLowerCase()) ||
     (a.job_title || '').toLowerCase().includes(q.toLowerCase())
   )
+
+  const openAppSidebar = (app: any) => {
+    const fullJob = {
+      ...(app.jobs || {}),
+      ...app,
+      id: app.id,
+      title: app.job_title || app.jobs?.title || 'Job Position',
+      company: app.company || app.jobs?.company || 'Company',
+      description: app.jobs?.description || app.description || app.notes || '',
+      tech_stack: app.jobs?.tech_stack || app.tech_stack || [],
+      location: app.location || app.jobs?.location || 'Remote',
+      source_url: app.source_url || app.jobs?.source_url,
+      fit_score: app.fit_score || app.jobs?.fit_score || 0
+    }
+    setSelectedJob(fullJob)
+  }
 
   return (
     <div className="space-y-6">
@@ -71,7 +105,7 @@ export default function ApplicationsPage() {
                 {filtered.length} Submissions
               </span>
             </div>
-            <p className="text-slate-500 text-sm mt-0.5">Track and manage your automated job application pipeline.</p>
+            <p className="text-slate-500 text-sm mt-0.5">Click any job application card to open the complete details & stipend sidebar.</p>
           </div>
         </div>
 
@@ -122,7 +156,11 @@ export default function ApplicationsPage() {
                 </tr>
               ) : (
                 filtered.map(app => (
-                  <tr key={app.id} className="group hover:bg-white/90 transition-colors">
+                  <tr
+                    key={app.id}
+                    onClick={() => openAppSidebar(app)}
+                    className="group hover:bg-white/90 cursor-pointer transition-all duration-200"
+                  >
                     
                     {/* Company */}
                     <td className="px-6 py-4">
@@ -130,7 +168,9 @@ export default function ApplicationsPage() {
                         <div className="w-8 h-8 rounded-xl bg-slate-100 border border-slate-200/60 flex items-center justify-center text-slate-700 font-bold shrink-0">
                           <Building2 size={16} />
                         </div>
-                        <span className="font-bold text-slate-900 text-sm">{app.company}</span>
+                        <span className="font-bold text-slate-900 text-sm group-hover:text-emerald-700 transition-colors">
+                          {app.company}
+                        </span>
                       </div>
                     </td>
 
@@ -199,7 +239,7 @@ export default function ApplicationsPage() {
                     </td>
 
                     {/* Actions */}
-                    <td className="px-6 py-4 text-right">
+                    <td className="px-6 py-4 text-right" onClick={e => e.stopPropagation()}>
                       <div className="flex items-center justify-end gap-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
                         {app.source_url && (
                           <a
@@ -228,6 +268,14 @@ export default function ApplicationsPage() {
           </table>
         </div>
       </div>
+
+      {/* Slide-over Job Details Sidebar */}
+      <JobDetailsSidebar
+        isOpen={!!selectedJob}
+        onClose={() => setSelectedJob(null)}
+        job={selectedJob}
+        onDelete={confirmDelete}
+      />
 
       {/* Delete Confirmation Modal */}
       {deletingId && (

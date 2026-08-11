@@ -2,7 +2,6 @@ import { chromium, BrowserContext, Page, Browser, ElementHandle } from 'playwrig
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
-import { GroqRotatingClient } from '../groq-client'
 import { normalizeProfile } from '../utils/profile'
 import { validateConfig } from '../config'
 import { logger } from '../logger'
@@ -16,16 +15,14 @@ export type { NormalizedProfile }
 
 export class PortalAutomationHybrid {
   private supabase: any
-  private groq: GroqRotatingClient
-  private groqApiKey: string
+  private groqApiKey?: string
   private context: BrowserContext | null = null
   private browser: Browser | null = null
   private _hasSession: boolean = false
 
-  constructor(supabase: any, groqApiKey: string) {
+  constructor(supabase: any, groqApiKey: string = '') {
     this.supabase = supabase
     this.groqApiKey = groqApiKey
-    this.groq = new GroqRotatingClient(groqApiKey)
   }
 
   private _getUserProfileDir(userId: string, portal: string): string {
@@ -124,33 +121,34 @@ export class PortalAutomationHybrid {
     if (!this.context) throw new Error('Automation not initialized. Call init() first.')
 
     // Fetch job details with fallback
-    let { data: job } = await this.supabase
+    const { data: jobRow } = await this.supabase
       .from('jobs')
       .select('*')
       .eq('id', jobId)
       .maybeSingle()
 
-    if (!job) {
-      const { data: appRow } = await this.supabase
-        .from('applications')
-        .select('*')
-        .eq('id', jobId)
-        .maybeSingle()
+    const { data: appRow } = await this.supabase
+      .from('applications')
+      .select('*')
+      .or(`job_id.eq.${jobId},id.eq.${jobId}`)
+      .eq('user_id', userId)
+      .maybeSingle()
 
-      if (!appRow && !job) throw new Error(`Job ${jobId} not found in database`)
-      
-      if (appRow) {
-        job = {
-          id: appRow.job_id || appRow.id,
-          user_id: appRow.user_id,
-          title: appRow.job_title || 'Job Opportunity',
-          company: appRow.company || 'Unknown',
-          location: appRow.location || 'Remote',
-          source_url: appRow.source_url,
-          source: appRow.source || 'linkedin',
-          application_type: appRow.source_url?.includes('linkedin.com') ? 'linkedin_easy_apply' : 'manual'
-        }
-      }
+    if (!jobRow && !appRow) throw new Error(`Job ${jobId} not found in database`)
+
+    let job = jobRow ? { ...jobRow } : {
+      id: appRow.job_id || appRow.id,
+      user_id: appRow.user_id,
+      title: appRow.job_title || 'Job Opportunity',
+      company: appRow.company || 'Unknown',
+      location: appRow.location || 'Remote',
+      source_url: appRow.source_url,
+      source: appRow.source || 'linkedin',
+      application_type: appRow.source_url?.includes('linkedin.com') ? 'linkedin_easy_apply' : 'manual'
+    }
+
+    if (appRow?.notes) {
+      (job as any).app_notes = appRow.notes
     }
 
     // Fetch candidate profile and normalize to canonical shape
@@ -354,6 +352,36 @@ export class PortalAutomationHybrid {
     }
     await this._delay(2000, 3000)
 
+    // Extract full job description from live page and update DB if available
+    try {
+      const fullDesc = await page.evaluate(() => {
+        const selectors = [
+          '#job-details',
+          '.jobs-description__content',
+          '.jobs-description-content',
+          '.show-more-less-html__markup',
+          '.description__text',
+          'article.jobs-description__container',
+          '.jobs-box__html-content'
+        ]
+        for (const sel of selectors) {
+          const el = document.querySelector(sel)
+          if (el && el.textContent && el.textContent.trim().length > 50) {
+            return el.textContent.trim()
+          }
+        }
+        return ''
+      })
+
+      if (fullDesc) {
+        job.description = fullDesc
+        const targetId = job.id || jobId
+        if (targetId) {
+          await this.supabase.from('jobs').update({ description: fullDesc }).eq('id', targetId)
+        }
+      }
+    } catch { /* ignore */ }
+
     // Step 2 — Check session valid
     if (page.url().includes('authwall') || page.url().includes('login')) {
       return { status: 'session_expired' }
@@ -511,8 +539,17 @@ export class PortalAutomationHybrid {
 
     console.log('[Automation] ✅ Easy Apply modal is open — starting form fill')
 
-    // Step 7 — Handle form ONLY inside the modal
-    return await this._handleModalForm(page, profile, userId, job.company, resumePath)
+    let jobSkillsExperience: Record<string, number> = { ...(profile?.skills_experience || {}) }
+    const notesContent = (job as any)?.app_notes || (job as any)?.notes || ''
+    if (notesContent) {
+      try {
+        const parsed = JSON.parse(notesContent)
+        if (parsed && typeof parsed.skills_experience === 'object') {
+          jobSkillsExperience = { ...jobSkillsExperience, ...parsed.skills_experience }
+        }
+      } catch {}
+    }
+    return await this._handleModalForm(page, profile, userId, job.company, resumePath, jobSkillsExperience)
   }
 
   /**
@@ -654,7 +691,7 @@ export class PortalAutomationHybrid {
   //     not accept its value is isolated instead of corrupting the step.
   // ─────────────────────────────────────────────────────────────────
 
-  private async _handleModalForm(page: Page, profile: any, userId: string, company: string, resumePath: string) {
+  private async _handleModalForm(page: Page, profile: any, userId: string, company: string, resumePath: string, jobSkillsExperience?: Record<string, number>) {
     const maxSteps = 10
     const MODAL_SELECTOR = '[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal, [data-test-modal], [aria-modal="true"]'
     const aiFiller = new FormAIFiller(this.groqApiKey)
@@ -682,80 +719,82 @@ export class PortalAutomationHybrid {
 
       // Step 2: Fill out form step via FormAIFiller (Heuristics + Groq JSON Answering)
       if (allFormFields.length > 0) {
-        await aiFiller.fillFormStep(page, allFormFields, profile)
+        await aiFiller.fillFormStep(page, allFormFields, profile, { skills_experience: jobSkillsExperience })
         await this._delay(150, 300)
       }
 
       // Handle conditional master resume file upload inside application modal
       if (!page.isClosed() && resumePath && fs.existsSync(resumePath)) {
         try {
-          // Check Condition 1: Is a resume currently attached or selected on screen?
-          const hasAttachedResume = await page.evaluate(() => {
+          const hasFileInput = await page.evaluate(() => {
             const modal = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], .artdeco-modal') || document.body
-            
-            // 1. Checked radio button or selected document item in document upload list
-            const checkedRadio = modal.querySelector('input[type="radio"]:checked, [class*="document-upload"] input:checked, [class*="card--selected"], [class*="item--selected"]')
-            if (checkedRadio) return true
-
-            // 2. Uploaded document title / filename element / remove button
-            const docElement = modal.querySelector(
-              '.jobs-document-upload__file-name, .jobs-document-upload__title, [class*="document-upload" i] [class*="title" i], [class*="file-name" i], button[aria-label*="Remove" i], button[aria-label*="Dismiss" i], button[aria-label*="Delete" i]'
-            )
-            if (docElement && (docElement.textContent || '').trim().length > 0) return true
-
-            // 3. Text content containing attached document extension (.pdf / .docx)
-            const text = (modal.textContent || '').toLowerCase()
-            return text.includes('.pdf') || text.includes('.docx')
+            return Boolean(modal.querySelector('input[type="file"], button[aria-label*="upload" i], label[for*="file" i], .jobs-document-upload__upload-button'))
           }).catch(() => false)
 
-          // Check Condition 2: Was the resume updated in the Resume Hub after our last upload?
-          const lastHubUpdate = profile?.resume_updated_at ? new Date(profile.resume_updated_at).getTime() : 0
-          const lastPortalUpload = (this as any)._lastResumeUploadTime || 0
-          const isResumeHubUpdated = lastHubUpdate > lastPortalUpload
+          if (hasFileInput) {
+            // Check Condition 1: Is a resume currently attached or selected on screen?
+            const hasAttachedResume = await page.evaluate(() => {
+              const modal = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], .artdeco-modal') || document.body
+              
+              // 1. Checked radio button or selected document item in document upload list
+              const checkedRadio = modal.querySelector('input[type="radio"]:checked, [class*="document-upload"] input:checked, [class*="card--selected"], [class*="item--selected"]')
+              if (checkedRadio) return true
 
-          // Upload ONLY if:
-          // Condition 1: No resume is attached on screen AND we haven't already uploaded one in this modal run
-          // Condition 2: Resume Hub was updated with a new resume
-          const shouldUpload = (!hasAttachedResume && !uploadedInThisModal) || isResumeHubUpdated
+              // 2. Uploaded document title / filename element / remove button
+              const docElement = modal.querySelector(
+                '.jobs-document-upload__file-name, .jobs-document-upload__title, [class*="document-upload" i] [class*="title" i], [class*="file-name" i], button[aria-label*="Remove" i], button[aria-label*="Dismiss" i], button[aria-label*="Delete" i]'
+              )
+              if (docElement && (docElement.textContent || '').trim().length > 0) return true
 
-          if (shouldUpload) {
-            const reason = !hasAttachedResume ? 'No resume detected on form' : 'Resume Hub updated with new CV'
-            console.log(`[Automation] 📄 Executing resume upload (${reason})...`)
+              // 3. Text content containing attached document extension (.pdf / .docx)
+              const text = (modal.textContent || '').toLowerCase()
+              return text.includes('.pdf') || text.includes('.docx')
+            }).catch(() => false)
 
-            // 1. Direct input set
-            const fileInputs = await page.$$('input[type="file"], .jobs-easy-apply-modal input[type="file"], [role="dialog"] input[type="file"]').catch(() => [])
-            for (const fileInput of fileInputs) {
-              try {
-                await fileInput.setInputFiles(resumePath)
-                console.log(`[Automation] 📄 Automatically uploaded master resume PDF into application form!`)
-                await this._delay(2000, 3000)
-              } catch { /* ignore */ }
-            }
+            // Check Condition 2: Was the resume updated in the Resume Hub after our last upload?
+            const lastHubUpdate = profile?.resume_updated_at ? new Date(profile.resume_updated_at).getTime() : 0
+            const lastPortalUpload = (this as any)._lastResumeUploadTime || 0
+            const isResumeHubUpdated = lastHubUpdate > lastPortalUpload
 
-            // 2. Click "Upload resume" button / label and handle FileChooser popup
-            const uploadBtns = await page.$$('button:has-text("Upload resume"), label:has-text("Upload resume"), .jobs-document-upload__upload-button, label[for*="file" i], button[aria-label*="upload" i]').catch(() => [])
-            for (const btn of uploadBtns) {
-              try {
-                const isVisible = await btn.isVisible().catch(() => false)
-                if (isVisible) {
-                  const [fileChooser] = await Promise.all([
-                    page.waitForEvent('filechooser', { timeout: 2500 }).catch(() => null),
-                    btn.click({ force: true }).catch(() => null)
-                  ])
-                  if (fileChooser) {
-                    await fileChooser.setFiles(resumePath)
-                    console.log(`[Automation] 📄 Clicked "Upload resume" button & attached master resume PDF (waiting 2.5s)...`)
-                    await this._delay(2000, 3000)
-                    break
+            const shouldUpload = (!hasAttachedResume && !uploadedInThisModal) || isResumeHubUpdated
+
+            if (shouldUpload) {
+              const reason = !hasAttachedResume ? 'No resume detected on form' : 'Resume Hub updated with new CV'
+              console.log(`[Automation] 📄 Executing resume upload (${reason})...`)
+
+              // 1. Direct input set
+              const fileInputs = await page.$$('input[type="file"], .jobs-easy-apply-modal input[type="file"], [role="dialog"] input[type="file"]').catch(() => [])
+              for (const fileInput of fileInputs) {
+                try {
+                  await fileInput.setInputFiles(resumePath)
+                  console.log(`[Automation] 📄 Automatically uploaded master resume PDF into application form!`)
+                  await this._delay(2000, 3000)
+                } catch { /* ignore */ }
+              }
+
+              // 2. Click "Upload resume" button / label and handle FileChooser popup
+              const uploadBtns = await page.$$('button:has-text("Upload resume"), label:has-text("Upload resume"), .jobs-document-upload__upload-button, label[for*="file" i], button[aria-label*="upload" i]').catch(() => [])
+              for (const btn of uploadBtns) {
+                try {
+                  const isVisible = await btn.isVisible().catch(() => false)
+                  if (isVisible) {
+                    const [fileChooser] = await Promise.all([
+                      page.waitForEvent('filechooser', { timeout: 2500 }).catch(() => null),
+                      btn.click({ force: true }).catch(() => null)
+                    ])
+                    if (fileChooser) {
+                      await fileChooser.setFiles(resumePath)
+                      console.log(`[Automation] 📄 Clicked "Upload resume" button & attached master resume PDF (waiting 2.5s)...`)
+                      await this._delay(2000, 3000)
+                      break
+                    }
                   }
-                }
-              } catch { /* ignore */ }
-            }
+                } catch { /* ignore */ }
+              }
 
-            uploadedInThisModal = true
-            ;(this as any)._lastResumeUploadTime = Date.now()
-          } else {
-            console.log(`[Automation] ℹ️ Resume already present on form and unchanged in Resume Hub — skipping upload button click.`)
+              uploadedInThisModal = true
+              ;(this as any)._lastResumeUploadTime = Date.now()
+            }
           }
         } catch { /* ignore */ }
       }

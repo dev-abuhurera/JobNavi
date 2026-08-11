@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Link2, RefreshCw, CheckCircle2, XCircle, Loader2, Wifi, WifiOff, Settings, ShieldCheck, Clock, ArrowUpRight } from 'lucide-react'
+import { toast } from 'sonner'
 
 type SessionStatus = 'active' | 'expired' | 'connecting' | null
 
@@ -27,11 +28,12 @@ export default function SettingsPage() {
     portfolio_url: '',
     github_url: '',
   })
-  const [toast, setToast] = useState<{ text: string; type: 'success' | 'error' | 'info' } | null>(null)
   const supabase = createClient()
 
   const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
-    setToast({ text, type }); setTimeout(() => setToast(null), 3000)
+    if (type === 'success') toast.success(text)
+    else if (type === 'error') toast.error(text)
+    else toast.info(text)
   }
 
   const fetchProfile = useCallback(async (uid: string) => {
@@ -52,11 +54,12 @@ export default function SettingsPage() {
   }, [])
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      if (data.user) {
-        setUserId(data.user.id)
+    supabase.auth.getSession().then(({ data }) => {
+      const user = data.session?.user
+      if (user) {
+        setUserId(user.id)
         refreshStatus()
-        fetchProfile(data.user.id)
+        fetchProfile(user.id)
       }
       setLoading(false)
     })
@@ -320,14 +323,6 @@ export default function SettingsPage() {
         </div>
 
       </div>
-
-      {/* Floating Glass Toast Notification */}
-      {toast && (
-        <div className="fixed bottom-6 right-6 z-50 bg-white/95 text-black border border-slate-300/80 backdrop-blur-2xl px-5 py-3.5 rounded-2xl shadow-2xl font-bold text-xs flex items-center gap-2.5 animate-bounce">
-          {toast.type === 'success' ? <CheckCircle2 size={16} className="text-emerald-600" /> : toast.type === 'error' ? <XCircle size={16} className="text-rose-600" /> : <Loader2 size={16} className="animate-spin text-amber-600" />}
-          <span className="text-black font-bold">{toast.text}</span>
-        </div>
-      )}
     </div>
   )
 }

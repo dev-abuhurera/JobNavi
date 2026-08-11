@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import { Compass, Mail, Lock, User, Loader2, ArrowRight, CheckCircle2 } from 'lucide-react'
 import Link from 'next/link'
+import { toast } from 'sonner'
 
 export default function SignUpPage() {
   const [email, setEmail] = useState('')
@@ -17,7 +18,15 @@ export default function SignUpPage() {
   const signup = async (e: React.FormEvent) => {
     e.preventDefault(); setLoading(true); setError(null)
     const { error } = await supabase.auth.signUp({ email, password, options: { data: { full_name: fullName }, emailRedirectTo: `${window.location.origin}/auth/callback` } })
-    if (error) { setError(error.message); setLoading(false) } else { setSuccess(true); setLoading(false) }
+    if (error) {
+      setError(error.message)
+      toast.error('Account Creation Failed', { description: error.message })
+      setLoading(false)
+    } else {
+      toast.success('Account Created!', { description: 'Please check your email to verify your account.' })
+      setSuccess(true)
+      setLoading(false)
+    }
   }
 
   if (success) {

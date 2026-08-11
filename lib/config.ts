@@ -7,7 +7,8 @@
 export interface AppConfig {
   supabaseUrl: string
   supabaseServiceRoleKey: string
-  groqApiKey: string
+  ollamaHost: string
+  ollamaModel: string
   chromeProfilePath: string
   chromeExecutablePath: string
 }
@@ -15,7 +16,6 @@ export interface AppConfig {
 const REQUIRED_VARS = [
   'NEXT_PUBLIC_SUPABASE_URL',
   'SUPABASE_SERVICE_ROLE_KEY',
-  'GROQ_API_KEY',
 ] as const
 
 export function validateConfig(): AppConfig {
@@ -33,7 +33,8 @@ export function validateConfig(): AppConfig {
   return {
     supabaseUrl:           process.env.NEXT_PUBLIC_SUPABASE_URL!,
     supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    groqApiKey:            process.env.GROQ_API_KEY!,
+    ollamaHost:            process.env.OLLAMA_HOST || 'http://localhost:11434',
+    ollamaModel:           process.env.OLLAMA_MODEL || 'job-filler',
 
     // Browser paths — override via env for portability across machines
     chromeProfilePath: process.env.CHROME_PROFILE_PATH ||
