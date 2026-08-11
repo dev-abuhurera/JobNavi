@@ -1,9 +1,10 @@
 'use client'
 
+import { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname, useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
-import { LayoutDashboard, Search, Target, Activity, CheckCircle, FileText, Settings, Zap, LogOut, Sparkles } from 'lucide-react'
+import { LayoutDashboard, Search, Target, Activity, CheckCircle, FileText, Settings, Zap, LogOut, Loader2 } from 'lucide-react'
 
 const NAV = [
   { label: 'Overview', href: '/dashboard', icon: LayoutDashboard, section: 'Main' },
@@ -20,15 +21,19 @@ export default function Sidebar({ user }: { user: { email?: string } | null }) {
   const pathname = usePathname()
   const router = useRouter()
   const supabase = createClient()
+  const [pendingHref, setPendingHref] = useState<string | null>(null)
+
+  useEffect(() => {
+    setPendingHref(null)
+  }, [pathname])
 
   const logout = async () => {
     await supabase.auth.signOut()
-    router.refresh()
     router.push('/login')
   }
 
   return (
-    <aside className="w-72 h-screen bg-white/70 backdrop-blur-3xl border-r border-white/90 shadow-[4px_0_30px_rgba(0,0,0,0.03)] flex flex-col p-6 select-none shrink-0">
+    <aside className="w-72 h-screen bg-white/80 backdrop-blur-xl border-r border-slate-200/60 shadow-[4px_0_30px_rgba(0,0,0,0.03)] flex flex-col p-6 shrink-0">
       
       {/* Brand Header */}
       <div className="flex items-center justify-between mb-4 px-1 pt-1">
@@ -63,21 +68,30 @@ export default function Sidebar({ user }: { user: { email?: string } | null }) {
             <h3 className="font-mono text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 px-3">{section}</h3>
             <div className="space-y-1">
               {NAV.filter(i => i.section === section).map(item => {
-                const active = pathname === item.href
+                const isNavigating = pendingHref === item.href && pathname !== item.href
+                const active = pendingHref ? pendingHref === item.href : pathname === item.href
+                
                 return (
                   <Link
                     key={item.href}
                     href={item.href}
                     prefetch={true}
+                    onClick={() => setPendingHref(item.href)}
                     aria-current={active ? 'page' : undefined}
-                    className={`flex items-center gap-3 px-3.5 py-2.5 rounded-2xl text-xs font-bold transition-all duration-200 ${
+                    className={`flex items-center justify-between px-3.5 py-2.5 rounded-2xl text-xs font-bold transition-all duration-150 ${
                       active
-                        ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md shadow-emerald-600/20 scale-[1.02]'
-                        : 'text-slate-600 hover:text-slate-900 hover:bg-white/80 hover:shadow-2xs'
+                        ? 'bg-gradient-to-r from-emerald-600 to-teal-600 text-white shadow-md shadow-emerald-600/20 scale-[1.01]'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100/80'
                     }`}
                   >
-                    <item.icon size={18} className={active ? 'text-white' : 'text-slate-400 group-hover:text-slate-700'} />
-                    {item.label}
+                    <div className="flex items-center gap-3">
+                      <item.icon size={18} className={active ? 'text-white' : 'text-slate-400 group-hover:text-slate-700'} />
+                      <span>{item.label}</span>
+                    </div>
+
+                    {isNavigating && (
+                      <Loader2 size={14} className="animate-spin text-white/80 shrink-0" />
+                    )}
                   </Link>
                 )
               })}

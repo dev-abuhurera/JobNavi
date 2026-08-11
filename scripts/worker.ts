@@ -241,14 +241,6 @@ async function saveJobs(jobs: any[], userId: string) {
   })
 
   for (const job of clean) {
-    let embedding: number[] | null = null
-    try {
-      const jobText = `${job.title || ''} ${job.company || ''} ${(job.description || '').slice(0, 1000)}`
-      embedding = await getEmbedding(jobText)
-    } catch (e: any) {
-      logger.warn('[Worker]', `Failed to generate vector embedding for "${job.title}": ${e.message}`)
-    }
-
     const record: Record<string, any> = {
       user_id: userId,
       title: job.title,
@@ -261,10 +253,6 @@ async function saveJobs(jobs: any[], userId: string) {
       tech_stack: job.tech_stack || [],
       status: 'discovered',
       application_type: classifyApplicationType(job.source_url)
-    }
-
-    if (embedding) {
-      record.embedding = embedding
     }
 
     try {

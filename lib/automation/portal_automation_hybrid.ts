@@ -9,7 +9,7 @@ import type { NormalizedProfile, ApplicationResult } from '../types'
 import { FormExtractor } from './form_extractor'
 import { FormDOMActions } from './form_dom_actions'
 import { FormAIFiller } from './form_ai_filler'
-
+import { StagehandService } from './stagehand_service'
 export { normalizeProfile }
 export type { NormalizedProfile }
 
@@ -375,7 +375,7 @@ export class PortalAutomationHybrid {
 
       if (fullDesc) {
         job.description = fullDesc
-        const targetId = job.id || jobId
+        const targetId = job.id
         if (targetId) {
           await this.supabase.from('jobs').update({ description: fullDesc }).eq('id', targetId)
         }
@@ -716,6 +716,9 @@ export class PortalAutomationHybrid {
       const unfilledFields = allFormFields.filter(f => f.isEmpty)
 
       console.log(`[Automation] Modal step ${step + 1}: ${unfilledFields.length} unfilled fields (${allFormFields.length} total fields on step)`)
+      if (unfilledFields.length > 0) {
+        console.log(`[Automation] 🔍 Detected unfilled fields: ${unfilledFields.map(f => `"${f.label}" (${f.type})`).join(', ')}`)
+      }
 
       // Step 2: Fill out form step via FormAIFiller (Heuristics + Groq JSON Answering)
       if (allFormFields.length > 0) {
@@ -918,6 +921,14 @@ export class PortalAutomationHybrid {
 
       if (clickResult.disabledReason) {
         console.log(`[Automation] ⚠️ Button state check: ${clickResult.disabledReason}`)
+      }
+
+      if (!clickResult.clicked) {
+        const aiClicked = await StagehandService.act('Click the Next, Continue, Review, or Submit button to advance the job application step')
+        if (aiClicked) {
+          clickResult.clicked = true
+          await this._delay(2000, 3000)
+        }
       }
 
       if (clickResult.clicked) {

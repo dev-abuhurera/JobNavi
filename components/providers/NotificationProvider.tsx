@@ -85,7 +85,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     let appsChannel: any = null
     let logsChannel: any = null
 
-    supabase.auth.getUser().then(({ data }) => {
+    supabase.auth.getUser().then(({ data }: { data: any }) => {
       const uid = data.user?.id
       if (!uid) return
 
@@ -93,7 +93,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
       // 1. Discovery tasks realtime
       tasksChannel = supabase.channel(`${prefix}-tasks`)
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'discovery_tasks', filter: `user_id=eq.${uid}` }, payload => {
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'discovery_tasks', filter: `user_id=eq.${uid}` }, (payload: any) => {
           const newStatus = payload.new.status
           const oldStatus = payload.old?.status
           if (newStatus !== oldStatus) {
@@ -118,7 +118,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
       // 2. Jobs discovered realtime
       jobsChannel = supabase.channel(`${prefix}-jobs`)
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'jobs', filter: `user_id=eq.${uid}` }, payload => {
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'jobs', filter: `user_id=eq.${uid}` }, (payload: any) => {
           const job = payload.new
           addNotification({
             title: `New Job: ${job.title}`,
@@ -131,7 +131,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
       // 3. Applications status realtime
       appsChannel = supabase.channel(`${prefix}-apps`)
-        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'applications', filter: `user_id=eq.${uid}` }, payload => {
+        .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'applications', filter: `user_id=eq.${uid}` }, (payload: any) => {
           const app = payload.new
           const oldStatus = payload.old?.current_status
           if (app.current_status !== oldStatus) {
@@ -163,7 +163,7 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 
       // 4. Activity Logs error alerts realtime
       logsChannel = supabase.channel(`${prefix}-logs`)
-        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, payload => {
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, (payload: any) => {
           const log = payload.new
           if (log.level === 'error') {
             addNotification({

@@ -1,34 +1,36 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createClient } from '@/lib/supabase/client'
 import { Terminal, ShieldCheck, AlertCircle, Info, Trash2, Activity, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 
 export default function LogsPage() {
-  const [logs, setLogs] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
   const supabase = createClient()
+  const queryClient = useQueryClient()
 
-  const fetchLogs = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession()
-    const user = session?.user
-    if (!user) return
-    const { data } = await supabase.from('activity_logs').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50)
-    if (data) setLogs(data)
-    setLoading(false)
-  }, [supabase])
+  const { data: logs = [], isLoading: loading } = useQuery({
+    queryKey: ['activity_logs'],
+    queryFn: async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      const user = session?.user
+      if (!user) return []
+      const { data } = await supabase.from('activity_logs').select('*').eq('user_id', user.id).order('created_at', { ascending: false }).limit(50)
+      return data || []
+    },
+  })
 
   useEffect(() => {
     let channel: any = null
-    fetchLogs()
-    supabase.auth.getSession().then(({ data }) => {
+    supabase.auth.getSession().then(({ data }: { data: any }) => {
       const uid = data.session?.user?.id
       if (!uid) return
-      const chName = `logs-${uid}-${Math.random().toString(36).substring(2, 8)}`
+      const chName = `logs-rt-${uid}-${Math.random().toString(36).substring(2, 8)}`
       const ch = supabase.channel(chName)
-      ch.on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, (p) => setLogs(c => [p.new, ...c].slice(0, 50)))
-      ch.on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, (p) => setLogs(c => c.filter(l => l.id !== p.old.id)))
+      ch.on('postgres_changes', { event: '*', schema: 'public', table: 'activity_logs', filter: `user_id=eq.${uid}` }, () => {
+        queryClient.invalidateQueries({ queryKey: ['activity_logs'] })
+      })
       ch.subscribe()
       channel = ch
     })
@@ -37,7 +39,7 @@ export default function LogsPage() {
         supabase.removeChannel(channel)
       }
     }
-  }, [fetchLogs, supabase])
+  }, [queryClient, supabase])
 
   const [showClearModal, setShowClearModal] = useState(false)
 
@@ -45,7 +47,7 @@ export default function LogsPage() {
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
     await supabase.from('activity_logs').delete().eq('user_id', user.id)
-    setLogs([])
+    queryClient.invalidateQueries({ queryKey: ['activity_logs'] })
     setShowClearModal(false)
     toast.info('Session activity logs cleared')
   }
@@ -177,7 +179,7 @@ export default function LogsPage() {
             </div>
           ) : (
             <div className="bg-white/80 border border-slate-200/80 rounded-2xl overflow-hidden divide-y divide-slate-100/80 shadow-2xs">
-              {logs.map((log, i) => (
+              {logs.map((log: any, i: number) => (
                 <div
                   key={`${log.id}-${i}`}
                   className="flex items-center gap-4 px-4 py-3 hover:bg-slate-50/70 transition-colors"

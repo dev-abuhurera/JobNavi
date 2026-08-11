@@ -1,53 +1,51 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createClient } from '@/lib/supabase/client'
 import { Target, ExternalLink, Trash2, Search, CheckCircle2, Calendar, Sparkles, Building2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { JobDetailsSidebar } from '@/components/dashboard/JobDetailsSidebar'
 
 export default function ApplicationsPage() {
-  const [apps, setApps] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
   const [q, setQ] = useState('')
   const [selectedJob, setSelectedJob] = useState<any | null>(null)
   const supabase = createClient()
+  const queryClient = useQueryClient()
 
-  const fetchApps = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession()
-    const user = session?.user
-    if (!user) return
-    let { data, error } = await supabase.from('applications').select('*, jobs(*)').eq('user_id', user.id).order('created_at', { ascending: false })
-    if (error) {
-      const fallback = await supabase.from('applications').select('*').eq('user_id', user.id).order('created_at', { ascending: false })
-      data = fallback.data
-    }
-    if (data) setApps(data)
-    setLoading(false)
-  }, [supabase])
+  const { data: apps = [], isLoading: loading, refetch } = useQuery({
+    queryKey: ['applications'],
+    queryFn: async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      const user = session?.user
+      if (!user) return []
+      let { data, error } = await supabase.from('applications').select('*, jobs(*)').eq('user_id', user.id).order('created_at', { ascending: false })
+      if (error) {
+        const fallback = await supabase.from('applications').select('*').eq('user_id', user.id).order('created_at', { ascending: false })
+        data = fallback.data
+      }
+      return data || []
+    },
+  })
 
   useEffect(() => {
     let channel: any = null
-    fetchApps()
-    window.addEventListener('focus', fetchApps)
-
-    supabase.auth.getSession().then(({ data }) => {
+    supabase.auth.getSession().then(({ data }: { data: any }) => {
       const uid = data.session?.user?.id
       if (!uid) return
-      const ch = supabase.channel(`apps-${uid}-${Math.random().toString(36).substring(2, 6)}`)
+      const ch = supabase.channel(`apps-rt-${uid}-${Math.random().toString(36).substring(2, 8)}`)
       ch.on('postgres_changes',
         { event: '*', schema: 'public', table: 'applications', filter: `user_id=eq.${uid}` },
-        () => fetchApps()
+        () => queryClient.invalidateQueries({ queryKey: ['applications'] })
       )
       ch.subscribe()
       channel = ch
     })
 
     return () => {
-      window.removeEventListener('focus', fetchApps)
       if (channel) supabase.removeChannel(channel)
     }
-  }, [fetchApps, supabase])
+  }, [queryClient, supabase])
 
   const [deletingId, setDeletingId] = useState<number | null>(null)
 
@@ -55,10 +53,10 @@ export default function ApplicationsPage() {
     const numId = Number(id)
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) return
-    const appToDelete = apps.find(a => a.id === numId)
+    const appToDelete = apps.find((a: any) => a.id === numId)
     const { error } = await supabase.from('applications').delete().eq('id', numId).eq('user_id', user.id)
     if (!error) {
-      setApps(prev => prev.filter(a => a.id !== numId))
+      queryClient.invalidateQueries({ queryKey: ['applications'] })
       if (selectedJob?.id === numId) setSelectedJob(null)
       toast.info('Application Record Deleted', {
         description: appToDelete ? `Removed ${appToDelete.job_title} at ${appToDelete.company}` : undefined,
@@ -69,7 +67,7 @@ export default function ApplicationsPage() {
     setDeletingId(null)
   }
 
-  const filtered = apps.filter(a =>
+  const filtered = apps.filter((a: any) =>
     (a.company || '').toLowerCase().includes(q.toLowerCase()) ||
     (a.job_title || '').toLowerCase().includes(q.toLowerCase())
   )
@@ -155,7 +153,7 @@ export default function ApplicationsPage() {
                   </td>
                 </tr>
               ) : (
-                filtered.map(app => (
+                filtered.map((app: any) => (
                   <tr
                     key={app.id}
                     onClick={() => openAppSidebar(app)}

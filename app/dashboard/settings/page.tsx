@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createClient } from '@/lib/supabase/client'
 import { Link2, RefreshCw, CheckCircle2, XCircle, Loader2, Wifi, WifiOff, Settings, ShieldCheck, Clock, ArrowUpRight } from 'lucide-react'
 import { toast } from 'sonner'
@@ -20,7 +21,6 @@ const COMING_SOON_PORTALS = [
 
 export default function SettingsPage() {
   const [userId, setUserId] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
   const [sessions, setSessions] = useState<Record<string, SessionStatus>>({})
   const [portalLoading, setPortalLoading] = useState<Record<string, boolean>>({})
   const [savingLinks, setSavingLinks] = useState(false)
@@ -29,6 +29,7 @@ export default function SettingsPage() {
     github_url: '',
   })
   const supabase = createClient()
+  const queryClient = useQueryClient()
 
   const showToast = (text: string, type: 'success' | 'error' | 'info' = 'success') => {
     if (type === 'success') toast.success(text)
@@ -36,36 +37,38 @@ export default function SettingsPage() {
     else toast.info(text)
   }
 
-  const fetchProfile = useCallback(async (uid: string) => {
-    const { data } = await supabase.from('profiles').select('*').eq('user_id', uid).maybeSingle()
-    if (data?.profile_data) {
-      setProfileData({
-        portfolio_url: data.profile_data.portfolio_url || data.profile_data.portfolio || data.profile_data.website || '',
-        github_url: data.profile_data.github_url || data.profile_data.github || '',
-      })
-    }
-  }, [supabase])
+  const { data: fetchedSettings, isLoading: loading } = useQuery({
+    queryKey: ['settings'],
+    queryFn: async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      const user = session?.user
+      if (!user) return { uid: null, profileData: { portfolio_url: '', github_url: '' }, sessions: {} }
 
-  const refreshStatus = useCallback(async () => {
-    try {
-      const res = await fetch('/api/portal/status')
-      if (res.ok) { const d = await res.json(); setSessions(d.sessions || {}) }
-    } catch {}
-  }, [])
+      const [profileRes, statusRes] = await Promise.all([
+        supabase.from('profiles').select('*').eq('user_id', user.id).maybeSingle(),
+        fetch('/api/portal/status').then(r => r.ok ? r.json() : {}).catch(() => ({})) as Promise<any>
+      ])
+
+      const pd = profileRes.data?.profile_data || {}
+      return {
+        uid: user.id,
+        profileData: {
+          portfolio_url: pd.portfolio_url || pd.portfolio || pd.website || '',
+          github_url: pd.github_url || pd.github || '',
+        },
+        sessions: statusRes.sessions || {},
+      }
+    },
+    refetchInterval: 4000,
+  })
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      const user = data.session?.user
-      if (user) {
-        setUserId(user.id)
-        refreshStatus()
-        fetchProfile(user.id)
-      }
-      setLoading(false)
-    })
-    const interval = setInterval(refreshStatus, 4000)
-    return () => clearInterval(interval)
-  }, [fetchProfile, refreshStatus, supabase.auth])
+    if (fetchedSettings) {
+      if (fetchedSettings.uid) setUserId(fetchedSettings.uid)
+      if (fetchedSettings.profileData) setProfileData(fetchedSettings.profileData)
+      if (fetchedSettings.sessions) setSessions(fetchedSettings.sessions)
+    }
+  }, [fetchedSettings])
 
   const saveLinks = async () => {
     if (!userId) return
@@ -88,6 +91,7 @@ export default function SettingsPage() {
     if (error) {
       showToast(`Save failed: ${error.message}`, 'error')
     } else {
+      queryClient.invalidateQueries({ queryKey: ['settings'] })
       showToast('Profile links saved successfully!', 'success')
     }
   }
@@ -111,7 +115,7 @@ export default function SettingsPage() {
       if (res.ok) {
         showToast(d.message || 'Portal session disconnected', 'success')
         setSessions(s => ({ ...s, [portalId]: null }))
-        await refreshStatus()
+        queryClient.invalidateQueries({ queryKey: ['settings'] })
       } else {
         showToast(d.error || 'Failed to disconnect portal', 'error')
       }

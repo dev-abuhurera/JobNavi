@@ -1,4 +1,5 @@
 import { Page } from 'playwright'
+import { StagehandService } from './stagehand_service'
 
 export interface ExtractedFormField {
   selector: string | null
@@ -19,6 +20,14 @@ export class FormExtractor {
    */
   static async extractFormJSON(page: Page): Promise<ExtractedFormField[]> {
     if (page.isClosed()) return []
+
+    // 1. Attempt AI-native extraction via Stagehand Service if available
+    try {
+      const stagehandFields = await StagehandService.extractFormFields(page)
+      if (stagehandFields.length > 0) {
+        return stagehandFields
+      }
+    } catch { /* fallback to Playwright DOM script */ }
 
     try {
       const script = `
@@ -51,7 +60,13 @@ export class FormExtractor {
 
           for (var gIdx = 0; gIdx < groupRadios.length; gIdx++) {
             var gr = groupRadios[gIdx];
-            if (gr.checked) isChecked = true;
+            var parentLabel = gr.closest ? (gr.closest('label') || gr.parentElement) : gr.parentElement;
+            var isRadioChecked = gr.checked || 
+              gr.getAttribute('aria-checked') === 'true' || 
+              (parentLabel && parentLabel.getAttribute('aria-checked') === 'true') ||
+              (parentLabel && parentLabel.className && (parentLabel.className.indexOf('artdeco-pill--selected') >= 0 || parentLabel.className.indexOf('selected') >= 0));
+            
+            if (isRadioChecked) isChecked = true;
             if (gr.required || gr.getAttribute('aria-required') === 'true') isRequired = true;
 
             var rLabel = '';
@@ -59,9 +74,8 @@ export class FormExtractor {
               var lEl = document.querySelector('label[for="' + gr.id + '"]') || document.getElementById(gr.id);
               if (lEl) rLabel = lEl.textContent || '';
             }
-            if (!rLabel && gr.closest) {
-              var parentLabel = gr.closest('label') || gr.parentElement;
-              if (parentLabel) rLabel = parentLabel.textContent || '';
+            if (!rLabel && parentLabel) {
+              rLabel = parentLabel.textContent || '';
             }
             if (!rLabel) rLabel = gr.value || ('Option ' + (gIdx + 1));
 
@@ -169,17 +183,21 @@ export class FormExtractor {
             }
           } else {
             currentValue = (input.value || '').trim();
-            var isRawUrn = currentValue.toLowerCase().indexOf('urn:li') >= 0 || currentValue.toLowerCase().indexOf('geo:') >= 0 || /^\d+$/.test(currentValue);
+            // ONLY treat value as a raw URN token if it starts with urn:li: or geo: or if it's a combobox/typeahead with a raw location ID
+            var isTypeahead = idAttr.indexOf('typeahead') >= 0 || idAttr.indexOf('location') >= 0 || ariaLabel.indexOf('location') >= 0 || (input.getAttribute('role') === 'combobox');
+            var isRawUrn = currentValue.toLowerCase().indexOf('urn:li') >= 0 || currentValue.toLowerCase().indexOf('geo:') >= 0 || (isTypeahead && /^\\d+$/.test(currentValue));
             
             if (isRawUrn) {
               currentValue = '';
-            } else if (!currentValue && el.closest) {
+            }
+            
+            if (!currentValue && el.closest) {
               var parentContainer = el.closest('.fb-dash-form-element, .jobs-easy-apply-form-section__element, .artdeco-typeahead, [class*="typeahead" i], fieldset, div');
               if (parentContainer) {
                 var selectedPill = parentContainer.querySelector('.artdeco-typeahead__result, [class*="pill" i], [class*="selected" i], [class*="badge" i], button[aria-label*="Remove" i], button[aria-label*="Dismiss" i]');
                 if (selectedPill) {
-                  var pillText = (selectedPill.textContent || '').replace(/\s+/g, ' ').trim();
-                  if (pillText.toLowerCase().indexOf('urn:li') < 0 && pillText.toLowerCase().indexOf('geo:') < 0 && !/^\d+$/.test(pillText)) {
+                  var pillText = (selectedPill.textContent || '').replace(/\\s+/g, ' ').trim();
+                  if (pillText.toLowerCase().indexOf('urn:li') < 0 && pillText.toLowerCase().indexOf('geo:') < 0 && !/^\\d+$/.test(pillText)) {
                     currentValue = pillText;
                   }
                 }
@@ -189,7 +207,7 @@ export class FormExtractor {
 
           var isEmpty = !currentValue || currentValue === '';
           if (input.type === 'checkbox') {
-            isEmpty = !input.checked;
+            isEmpty = !input.checked && input.getAttribute('aria-checked') !== 'true';
           }
 
           var opts = undefined;

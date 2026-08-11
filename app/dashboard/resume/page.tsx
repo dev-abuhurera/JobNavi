@@ -1,6 +1,7 @@
 'use client'
 
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createClient } from '@/lib/supabase/client'
 import { FileText, Upload, CheckCircle, FileUp, Loader2, Sparkles, ShieldCheck, CheckCircle2, Sliders, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
@@ -20,12 +21,13 @@ const PREF_FIELDS = [
 const MAX_BYTES = 5 * 1024 * 1024
 
 export default function ResumeHubPage() {
-  const [profile, setProfile] = useState<any>(null)
+  const [localProfile, setLocalProfile] = useState<any>(null)
   const [uploading, setUploading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [note, setNote] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null)
   const [saved, setSaved] = useState(false)
   const supabase = createClient()
+  const queryClient = useQueryClient()
 
   const notify = (type: 'success' | 'info' | 'error', message: string) => {
     setNote({ type, message })
@@ -40,18 +42,27 @@ export default function ResumeHubPage() {
     }
   }
 
-  const fetchProfile = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession()
-    const user = session?.user
-    if (!user) return
-    const { data } = await supabase.from('profiles').select('*').eq('user_id', user.id).maybeSingle()
-    if (data) setProfile(data)
-  }, [supabase])
+  const { data: fetchedProfile, refetch: fetchProfile } = useQuery({
+    queryKey: ['profile'],
+    queryFn: async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      const user = session?.user
+      if (!user) return null
+      const { data } = await supabase.from('profiles').select('*').eq('user_id', user.id).maybeSingle()
+      return data || null
+    },
+  })
 
-  useEffect(() => { fetchProfile() }, [fetchProfile])
+  useEffect(() => {
+    if (fetchedProfile) {
+      setLocalProfile(fetchedProfile)
+    }
+  }, [fetchedProfile])
+
+  const profile = localProfile || fetchedProfile || {}
 
   const setPref = (key: string, val: any) =>
-    setProfile((p: any) => ({ ...p, profile_data: { ...(p?.profile_data || {}), [key]: val } }))
+    setLocalProfile((p: any) => ({ ...p, profile_data: { ...(p?.profile_data || {}), [key]: val } }))
 
   const savePrefs = async () => {
     setSaving(true)
@@ -70,6 +81,7 @@ export default function ResumeHubPage() {
     if (error) {
       notify('error', `Save failed: ${error.message}`)
     } else {
+      queryClient.invalidateQueries({ queryKey: ['profile'] })
       notify('success', 'Preferences saved! These auto-fill matching questions during applications.')
       setSaved(true)
       setTimeout(() => setSaved(false), 2500)

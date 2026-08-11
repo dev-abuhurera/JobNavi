@@ -24,7 +24,6 @@ export default function LoginPage() {
       setLoading(false)
     } else {
       toast.success('Welcome Back!', { description: 'Redirecting to your dashboard...' })
-      router.refresh()
       router.push('/dashboard')
     }
   }

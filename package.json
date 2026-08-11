@@ -12,10 +12,12 @@
     "render-build": "npm install && npx playwright install --with-deps && next build"
   },
   "dependencies": {
+    "@browserbasehq/stagehand": "^4.0.0",
     "@langchain/community": "^1.1.29",
     "@langchain/core": "^1.2.4",
     "@supabase/ssr": "latest",
     "@supabase/supabase-js": "latest",
+    "@tanstack/react-query": "^5.101.4",
     "@xenova/transformers": "^2.17.2",
     "axios": "^1.16.0",
     "clsx": "latest",

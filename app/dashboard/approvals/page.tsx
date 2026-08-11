@@ -1,34 +1,37 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { createClient } from '@/lib/supabase/client'
 import { CheckCircle, XCircle, ExternalLink, Building2, MapPin, Trash2, CheckCircle2, Sparkles, ShieldCheck } from 'lucide-react'
 import { toast } from 'sonner'
 import { JobDetailsSidebar } from '@/components/dashboard/JobDetailsSidebar'
 
 export default function ApprovalsPage() {
-  const [jobs, setJobs] = useState<any[]>([])
-  const [loading, setLoading] = useState(true)
   const supabase = createClient()
-
+  const queryClient = useQueryClient()
   const [selectedJob, setSelectedJob] = useState<any | null>(null)
-  const [userProfile, setUserProfile] = useState<any>(null)
   const [deletingId, setDeletingId] = useState<string | number | null>(null)
 
-  const fetchJobs = useCallback(async () => {
-    const { data: { session } } = await supabase.auth.getSession()
-    const user = session?.user
-    if (!user) return
-    const [jobsRes, profileRes] = await Promise.all([
-      supabase.from('jobs').select('*').eq('user_id', user.id).eq('status', 'discovered').order('fit_score', { ascending: false }),
-      supabase.from('profiles').select('profile_data').eq('user_id', user.id).maybeSingle()
-    ])
-    if (jobsRes.data) setJobs(jobsRes.data)
-    if (profileRes.data) setUserProfile(profileRes.data.profile_data || {})
-    setLoading(false)
-  }, [supabase])
+  const { data: approvalData, isLoading: loading, refetch } = useQuery({
+    queryKey: ['approvals'],
+    queryFn: async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+      const user = session?.user
+      if (!user) return { jobs: [], profile: {} }
+      const [jobsRes, profileRes] = await Promise.all([
+        supabase.from('jobs').select('*').eq('user_id', user.id).eq('status', 'discovered').order('fit_score', { ascending: false }),
+        supabase.from('profiles').select('profile_data').eq('user_id', user.id).maybeSingle()
+      ])
+      return {
+        jobs: jobsRes.data || [],
+        profile: profileRes.data?.profile_data || {}
+      }
+    },
+  })
 
-  useEffect(() => { fetchJobs() }, [fetchJobs])
+  const jobs = approvalData?.jobs || []
+  const userProfile = approvalData?.profile || {}
 
   const openJobModal = (job: any) => {
     setSelectedJob(job)
@@ -63,7 +66,7 @@ export default function ApprovalsPage() {
       return
     }
 
-    setJobs(jobs.filter(j => j.id !== job.id))
+    queryClient.invalidateQueries({ queryKey: ['approvals'] })
     if (selectedJob?.id === job.id) setSelectedJob(null)
 
     if (action === 'rejected') {
@@ -100,6 +103,8 @@ export default function ApprovalsPage() {
       appError = error
     }
 
+    queryClient.invalidateQueries({ queryKey: ['applications'] })
+
     if (appError) {
       toast.error('Failed to queue job', { description: appError.message })
       return
@@ -116,7 +121,7 @@ export default function ApprovalsPage() {
     if (!user) return
     const { error } = await supabase.from('jobs').delete().eq('id', id).eq('user_id', user.id)
     if (!error) {
-      setJobs(prev => prev.filter(j => j.id !== id))
+      queryClient.invalidateQueries({ queryKey: ['approvals'] })
       if (selectedJob?.id === id) setSelectedJob(null)
       toast.info('Job record deleted')
     } else {
@@ -168,7 +173,7 @@ export default function ApprovalsPage() {
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          {jobs.map(job => (
+          {jobs.map((job: any) => (
             <div
               key={job.id}
               onClick={() => openJobModal(job)}

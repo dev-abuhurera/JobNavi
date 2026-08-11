@@ -50,7 +50,7 @@ export default function DiscoveryPage() {
     loadData()
     window.addEventListener('focus', loadData)
 
-    supabase.auth.getSession().then(({ data }) => {
+    supabase.auth.getSession().then(({ data }: { data: any }) => {
       const uid = data.session?.user?.id
       if (!uid) return
       const chName = `tasks-${uid}-${Math.random().toString(36).substring(2, 8)}`
