@@ -1,9 +1,3 @@
-// ─────────────────────────────────────────────────────────────────
-// lib/logger.ts
-// Structured logger with consistent format and log levels.
-// Replaces ad-hoc console.log calls across the codebase.
-// ─────────────────────────────────────────────────────────────────
-
 import type { LogLevel } from './types'
 
 const ICONS: Record<LogLevel, string> = {

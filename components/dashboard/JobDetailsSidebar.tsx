@@ -25,7 +25,9 @@ import {
   ShieldCheck,
   Zap,
   TrendingUp,
-  FileText
+  FileText,
+  Loader2,
+  Award
 } from 'lucide-react'
 import { extractStipendOrSalary, extractRecruiterContacts, formatJobDescription } from '@/lib/utils/job-details'
 import { toast } from 'sonner'
@@ -49,27 +51,75 @@ export function JobDetailsSidebar({
   onDelete,
   userProfile
 }: JobDetailsSidebarProps) {
-  const [activeTab, setActiveTab] = useState<'overview' | 'description' | 'skills' | 'history'>('overview')
+  const [activeTab, setActiveTab] = useState<'overview' | 'description' | 'skills'>('overview')
   const [skillExp, setSkillExp] = useState<Record<string, number>>({})
   const [copied, setCopied] = useState(false)
   const [submittingAction, setSubmittingAction] = useState(false)
 
-  // Sync skill experience defaults when job opens
+  const [fullDescription, setFullDescription] = useState<string>('')
+  const [techStack, setTechStack] = useState<string[]>([])
+  const [fetchingDetails, setFetchingDetails] = useState<boolean>(false)
+
+  // User candidate profile skills list for matching
+  const candidateSkills: string[] = Array.isArray(userProfile?.skills)
+    ? userProfile.skills.map((s: any) => String(s).toLowerCase().trim())
+    : []
+  const candidateSkillsExp: Record<string, number> = userProfile?.skills_experience || {}
+
+  // Sync skill experience & fetch full description/skills when job opens
   useEffect(() => {
     if (!job) return
+
+    const initialDesc = job.description || ''
+    const initialTech: string[] = Array.isArray(job.tech_stack) ? job.tech_stack : []
+
+    setFullDescription(initialDesc)
+    setTechStack(initialTech)
+    setActiveTab('overview')
+
     const pdSkillsExp: Record<string, number> = userProfile?.skills_experience || {}
     const defaultYrs = Number(userProfile?.years_of_experience) || 3
-    const techStack: string[] = job.tech_stack || []
 
     const initialExp: Record<string, number> = {}
-    for (const tech of techStack) {
+    for (const tech of initialTech) {
       initialExp[tech] = pdSkillsExp[tech] !== undefined ? pdSkillsExp[tech] : defaultYrs
     }
     if (job.metadata?.skills_experience) {
       Object.assign(initialExp, job.metadata.skills_experience)
     }
     setSkillExp(initialExp)
-    setActiveTab('overview')
+
+    // Trigger AI description & skill extraction if missing or placeholder text
+    const isPlaceholder = !initialDesc || initialDesc.length < 250 || initialDesc.includes('discovered on LinkedIn') || initialDesc.includes('Easy Apply position') || initialDesc.startsWith('Live LinkedIn Easy Apply Job')
+    const needsFetch = isPlaceholder || initialTech.length === 0
+    if (needsFetch && (job.id || job.source_url)) {
+      setFetchingDetails(true)
+      fetch('/api/jobs/fetch-description', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jobId: job.id, sourceUrl: job.source_url })
+      })
+        .then(res => res.json())
+        .then(data => {
+          if (data.description) {
+            setFullDescription(data.description)
+          }
+          if (Array.isArray(data.tech_stack) && data.tech_stack.length > 0) {
+            setTechStack(data.tech_stack)
+            const updatedExp: Record<string, number> = {}
+            for (const t of data.tech_stack) {
+              updatedExp[t] = pdSkillsExp[t] !== undefined ? pdSkillsExp[t] : defaultYrs
+            }
+            setSkillExp(prev => ({ ...updatedExp, ...prev }))
+          }
+        })
+        .catch(err => {
+          console.warn('Job details fetch error:', err)
+        })
+        .finally(() => {
+          setFetchingDetails(false)
+        })
+    }
   }, [job, userProfile])
 
   // ESC key listener to close sidebar
@@ -85,9 +135,15 @@ export function JobDetailsSidebar({
 
   if (!isOpen || !job) return null
 
-  const compensation = extractStipendOrSalary(job)
-  const contacts = extractRecruiterContacts(job)
-  const formattedDesc = formatJobDescription(job.description)
+  const displayJob = {
+    ...job,
+    description: fullDescription || job.description || '',
+    tech_stack: techStack.length > 0 ? techStack : (job.tech_stack || [])
+  }
+
+  const compensation = extractStipendOrSalary(displayJob)
+  const contacts = extractRecruiterContacts(displayJob)
+  const formattedDesc = formatJobDescription(displayJob.description)
   const fitScore = typeof job.fit_score === 'number' ? job.fit_score : (job.fit_score ? Number(job.fit_score) : 75)
 
   const isDiscovered = job.status === 'discovered' || !job.current_status
@@ -105,7 +161,7 @@ export function JobDetailsSidebar({
     if (!onApprove) return
     setSubmittingAction(true)
     try {
-      await onApprove(job, skillExp)
+      await onApprove(displayJob, skillExp)
       onClose()
     } finally {
       setSubmittingAction(false)
@@ -132,6 +188,12 @@ export function JobDetailsSidebar({
     } finally {
       setSubmittingAction(false)
     }
+  }
+
+  const isSkillMatchedInProfile = (skill: string) => {
+    const sLower = skill.toLowerCase().trim()
+    if (candidateSkillsExp[skill] !== undefined) return true
+    return candidateSkills.some(cs => cs.includes(sLower) || sLower.includes(cs))
   }
 
   return (
@@ -242,31 +304,36 @@ export function JobDetailsSidebar({
             </button>
             <button
               onClick={() => setActiveTab('description')}
-              className={`py-3 px-4 text-xs font-bold transition-all relative border-b-2 ${
+              className={`py-3 px-4 text-xs font-bold transition-all relative border-b-2 flex items-center gap-1.5 ${
                 activeTab === 'description'
                   ? 'border-emerald-600 text-emerald-700 font-semibold'
                   : 'border-transparent text-slate-500 hover:text-slate-800'
               }`}
             >
-              Full Job Description
+              <FileText size={14} /> Full Job Description
             </button>
-            {job.tech_stack && job.tech_stack.length > 0 && (
-              <button
-                onClick={() => setActiveTab('skills')}
-                className={`py-3 px-4 text-xs font-bold transition-all relative border-b-2 ${
-                  activeTab === 'skills'
-                    ? 'border-emerald-600 text-emerald-700 font-semibold'
-                    : 'border-transparent text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                Required Skills ({job.tech_stack.length})
-              </button>
-            )}
+            <button
+              onClick={() => setActiveTab('skills')}
+              className={`py-3 px-4 text-xs font-bold transition-all relative border-b-2 flex items-center gap-1.5 ${
+                activeTab === 'skills'
+                  ? 'border-emerald-600 text-emerald-700 font-semibold'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <Award size={14} /> Required Skills ({techStack.length})
+            </button>
           </div>
 
           {/* Scrollable Content Body */}
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             
+            {fetchingDetails && (
+              <div className="bg-emerald-500/10 border border-emerald-200 rounded-2xl p-3.5 flex items-center gap-3 text-xs font-semibold text-emerald-900 animate-pulse">
+                <Loader2 size={16} className="animate-spin text-emerald-600 shrink-0" />
+                <span>AI Agent is extracting complete job description & tech skills...</span>
+              </div>
+            )}
+
             {activeTab === 'overview' && (
               <>
                 {/* Prominent Stipend / Compensation Highlight Card */}
@@ -334,6 +401,45 @@ export function JobDetailsSidebar({
                   </div>
                 </div>
 
+                {/* Extracted Skills & Requirements Section */}
+                <div className="bg-white/80 border border-slate-200/80 rounded-3xl p-5 shadow-2xs space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="font-display font-bold text-xs uppercase tracking-wider text-slate-500 font-mono flex items-center gap-2">
+                      <Award size={15} className="text-emerald-600" /> Extracted Skill Requirements
+                    </h4>
+                    <span className="font-mono text-[11px] text-emerald-700 font-bold">
+                      {techStack.length} Skills Identified
+                    </span>
+                  </div>
+
+                  {techStack.length > 0 ? (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {techStack.map((tech: string) => {
+                        const isMatched = isSkillMatchedInProfile(tech)
+                        return (
+                          <span
+                            key={tech}
+                            className={`inline-flex items-center gap-1 font-mono text-xs font-bold px-3 py-1 rounded-xl border shadow-2xs transition-all ${
+                              isMatched
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                : 'bg-slate-100 text-slate-700 border-slate-200'
+                            }`}
+                          >
+                            {isMatched ? (
+                              <CheckCircle2 size={13} className="text-emerald-600 shrink-0" />
+                            ) : (
+                              <Layers size={13} className="text-slate-400 shrink-0" />
+                            )}
+                            {tech}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-500 italic">No specific tech skills parsed yet. Open Full Job Description to inspect details.</p>
+                  )}
+                </div>
+
                 {/* Quick Info Grid */}
                 <div className="grid grid-cols-2 gap-4">
                   <div className="bg-white/80 border border-slate-200/80 rounded-2xl p-4 shadow-2xs space-y-1">
@@ -385,25 +491,6 @@ export function JobDetailsSidebar({
                     </div>
                   </div>
                 )}
-
-                {/* Tech Stack Preview */}
-                {job.tech_stack && job.tech_stack.length > 0 && (
-                  <div className="space-y-2.5">
-                    <h4 className="font-display font-bold text-xs uppercase tracking-wider text-slate-400 font-mono">
-                      Target Technologies
-                    </h4>
-                    <div className="flex flex-wrap gap-2">
-                      {job.tech_stack.map((tech: string) => (
-                        <span
-                          key={tech}
-                          className="font-mono text-xs font-bold px-3 py-1 rounded-xl bg-emerald-50 text-emerald-800 border border-emerald-200/80 shadow-2xs"
-                        >
-                          {tech}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </>
             )}
 
@@ -422,50 +509,70 @@ export function JobDetailsSidebar({
                   </button>
                 </div>
 
-                <div className="bg-slate-50/80 border border-slate-200/80 rounded-3xl p-6 shadow-2xs font-sans text-xs text-slate-700 leading-relaxed space-y-4 whitespace-pre-wrap selection:bg-emerald-100 min-h-[160px]">
+                <div className="bg-slate-50/80 border border-slate-200/80 rounded-3xl p-6 shadow-2xs font-sans text-xs text-slate-700 leading-relaxed space-y-4 whitespace-pre-wrap selection:bg-emerald-100 min-h-[220px]">
                   {formattedDesc}
                 </div>
               </div>
             )}
 
-            {activeTab === 'skills' && job.tech_stack && (
+            {activeTab === 'skills' && (
               <div className="space-y-4">
                 <div>
-                  <h3 className="font-display font-bold text-base text-slate-900">Required Skills & Experience</h3>
+                  <h3 className="font-display font-bold text-base text-slate-900">Extracted Skills & Experience Tuning</h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Verify or tune your experience level (years) for each required skill before applying.
+                    Skills parsed directly from job description. Verify or adjust your experience level (years) for each required skill before auto-applying.
                   </p>
                 </div>
 
-                <div className="space-y-3">
-                  {job.tech_stack.map((tech: string) => (
-                    <div
-                      key={tech}
-                      className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-2xs flex items-center justify-between gap-4"
-                    >
-                      <div className="flex items-center gap-3">
-                        <div className="w-8 h-8 rounded-xl bg-emerald-500/10 text-emerald-700 font-bold flex items-center justify-center font-mono text-xs">
-                          {tech[0]?.toUpperCase()}
-                        </div>
-                        <span className="font-semibold text-slate-900 text-xs">{tech}</span>
-                      </div>
+                {techStack.length > 0 ? (
+                  <div className="space-y-3">
+                    {techStack.map((tech: string) => {
+                      const isMatched = isSkillMatchedInProfile(tech)
+                      return (
+                        <div
+                          key={tech}
+                          className="bg-white border border-slate-200/80 rounded-2xl p-4 shadow-2xs flex items-center justify-between gap-4"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className={`w-8 h-8 rounded-xl font-bold flex items-center justify-center font-mono text-xs ${
+                              isMatched ? 'bg-emerald-500/10 text-emerald-700' : 'bg-slate-100 text-slate-600'
+                            }`}>
+                              {tech[0]?.toUpperCase()}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-semibold text-slate-900 text-xs">{tech}</span>
+                                {isMatched && (
+                                  <span className="font-mono text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                    Matched in Profile
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
 
-                      <div className="flex items-center gap-2">
-                        <label className="text-[11px] font-bold text-slate-400 font-mono">Years:</label>
-                        <input
-                          type="number"
-                          min={0}
-                          max={30}
-                          value={skillExp[tech] ?? 3}
-                          onChange={e =>
-                            setSkillExp(prev => ({ ...prev, [tech]: Math.max(0, parseInt(e.target.value) || 0) }))
-                          }
-                          className="w-16 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 text-center text-xs font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                          <div className="flex items-center gap-2">
+                            <label className="text-[11px] font-bold text-slate-400 font-mono">Years:</label>
+                            <input
+                              type="number"
+                              min={0}
+                              max={30}
+                              value={skillExp[tech] ?? (candidateSkillsExp[tech] !== undefined ? candidateSkillsExp[tech] : 3)}
+                              onChange={e =>
+                                setSkillExp(prev => ({ ...prev, [tech]: Math.max(0, parseInt(e.target.value) || 0) }))
+                              }
+                              className="w-16 bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1 text-center text-xs font-mono font-bold text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                            />
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-8 text-center text-xs text-slate-500">
+                    No skills extracted yet. The AI agent extracts skills directly when reading job postings.
+                  </div>
+                )}
               </div>
             )}
 

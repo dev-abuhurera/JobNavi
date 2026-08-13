@@ -1,9 +1,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // lib/ollama-client.ts
-// Local Ollama AI Client for Job Agent (Zero 3rd-Party API Dependencies)
+// Local Ollama AI Client powered by LangChain (@langchain/ollama & @langchain/core)
 // Connects directly to local Ollama instance (http://localhost:11434)
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { ChatOllama } from '@langchain/ollama'
+import { SystemMessage, HumanMessage, AIMessage, BaseMessage } from '@langchain/core/messages'
 import { z } from 'zod'
 import { logger } from './logger'
 
@@ -29,6 +31,17 @@ export class OllamaClient {
   }
 
   /**
+   * Instantiates a standard LangChain ChatOllama model instance.
+   */
+  private createChatModel(modelName: string): ChatOllama {
+    return new ChatOllama({
+      baseUrl: this.host,
+      model: modelName,
+      temperature: this.temperature,
+    })
+  }
+
+  /**
    * Safely extracts clean JSON string from raw text response,
    * stripping markdown codeblock backticks and preamble text.
    */
@@ -39,7 +52,6 @@ export class OllamaClient {
       .replace(/\s*```$/i, '')
       .trim()
 
-    // Match JSON object block if LLM returned preamble / conversational text
     const objectMatch = clean.match(/\{[\s\S]*\}/)
     if (objectMatch) return objectMatch[0]
 
@@ -60,7 +72,6 @@ export class OllamaClient {
       const models: Array<{ name: string }> = data.models || []
       if (models.length === 0) return null
 
-      // Prefer job-filler or qwen models if present
       const preferred = models.find(m => m.name.includes('job-filler') || m.name.includes('qwen'))
       return preferred ? preferred.name : models[0].name
     } catch {
@@ -69,68 +80,73 @@ export class OllamaClient {
   }
 
   /**
-   * Structured JSON completion validated with Zod schema against local Ollama.
+   * Auto-starts local Ollama server in background if not already running.
+   */
+  private async ensureOllamaServer(): Promise<void> {
+    try {
+      const res = await fetch(`${this.host}/api/tags`, { method: 'GET' })
+      if (res.ok) return
+    } catch {
+      logger.info('[OllamaClient]', `Ollama server not responding at ${this.host}. Auto-starting 'ollama serve' in background...`)
+      try {
+        const { exec } = await import('child_process')
+        exec('ollama serve >/dev/null 2>&1 &')
+
+        // Active readiness polling (up to 10s)
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 500))
+          try {
+            const check = await fetch(`${this.host}/api/tags`, { method: 'GET' })
+            if (check.ok) {
+              logger.info('[OllamaClient]', `Ollama server successfully started and responding at ${this.host}`)
+              return
+            }
+          } catch {}
+        }
+      } catch {}
+    }
+  }
+
+  /**
+   * Structured JSON completion validated with Zod schema using LangChain ChatOllama & Core Messages.
    */
   async chatStructured<T>(
     messages: Array<[string, string]>,
     schema: z.ZodType<T>
   ): Promise<T> {
-    const formattedMessages = messages.map(([role, content]) => ({
-      role: role === 'human' ? 'user' : role,
-      content,
-    }))
-
-    // Append JSON enforcement directive to system message if needed
-    const systemIndex = formattedMessages.findIndex(m => m.role === 'system')
-    const jsonInstruction = `\n\nCRITICAL: You MUST respond ONLY with a valid JSON object matching the requested output structure. Do NOT include markdown codeblock backticks (\`\`\`json), explanations, or preamble.`
-
-    if (systemIndex >= 0) {
-      formattedMessages[systemIndex].content += jsonInstruction
-    } else {
-      formattedMessages.unshift({
-        role: 'system',
-        content: `You are a helpful AI assistant.${jsonInstruction}`,
-      })
-    }
+    await this.ensureOllamaServer()
 
     let activeModel = this.model
     let lastError: Error | null = null
 
+    // Convert raw [role, content] tuples to literal LangChain BaseMessage objects (prevents template variable parsing on JSON strings)
+    const langChainMessages: BaseMessage[] = messages.map(([role, content]) => {
+      const r = role.toLowerCase()
+      if (r === 'system') return new SystemMessage(content)
+      if (r === 'human' || r === 'user') return new HumanMessage(content)
+      return new AIMessage(content)
+    })
+
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const payload = {
-          model: activeModel,
-          messages: formattedMessages,
-          format: 'json',
-          stream: false,
-          options: {
-            temperature: this.temperature,
-            top_p: 0.95,
-          },
+        const llm = this.createChatModel(activeModel)
+
+        // Try LangChain native .withStructuredOutput first
+        try {
+          const structuredLlm = llm.withStructuredOutput(schema as any)
+          const res = (await structuredLlm.invoke(langChainMessages)) as T
+          if (res) return res
+        } catch {
+          // Fallback to LangChain model invocation with manual Zod parsing if native structured output varies by Ollama version
         }
 
-        const response = await fetch(`${this.host}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        })
-
-        if (!response.ok) {
-          const errText = await response.text()
-          // If configured model is missing (404), check if another local model is installed
-          if (response.status === 404 && activeModel === this.model) {
-            const fallbackModel = await this.findAvailableLocalModel()
-            if (fallbackModel && fallbackModel !== activeModel) {
-              logger.warn('[OllamaClient]', `Local model '${activeModel}' not found. Switching to installed local model '${fallbackModel}'...`)
-              activeModel = fallbackModel
-              continue
-            }
-          }
-          throw new Error(`Ollama HTTP error ${response.status}: ${errText}`)
-        }
-
-        const data = await response.json()
-        const rawContent = data.message?.content || ''
+        // Direct LangChain ChatOllama invocation fallback
+        const promptMessages = [
+          ...langChainMessages,
+          new HumanMessage('\nCRITICAL: Respond ONLY in valid JSON matching the requested structure without preamble or markdown.')
+        ]
+        const response = await llm.invoke(promptMessages)
+        const rawContent = typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
         const cleanContent = this.extractJsonContent(rawContent)
 
         let parsedJson = JSON.parse(cleanContent)
@@ -158,16 +174,24 @@ export class OllamaClient {
         return validated
       } catch (err: any) {
         lastError = err
-        logger.warn('[OllamaClient]', `Local Ollama attempt ${attempt + 1}/3 failed for model '${activeModel}': ${err.message}`)
+        if (err.message?.includes('404') && activeModel === this.model) {
+          const fallbackModel = await this.findAvailableLocalModel()
+          if (fallbackModel && fallbackModel !== activeModel) {
+            logger.warn('[OllamaClient]', `LangChain: Local model '${activeModel}' not found. Switching to '${fallbackModel}'...`)
+            activeModel = fallbackModel
+            continue
+          }
+        }
+        logger.warn('[OllamaClient]', `LangChain Ollama attempt ${attempt + 1}/3 failed for model '${activeModel}': ${err.message}`)
         await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
       }
     }
 
-    throw new Error(`[OllamaClient] Failed structured output generation after 3 attempts: ${lastError?.message}`)
+    throw new Error(`[OllamaClient] Failed LangChain structured output generation after 3 attempts: ${lastError?.message}`)
   }
 
   /**
-   * Plain JSON completion helper.
+   * Plain JSON completion helper powered by LangChain.
    */
   async chatJSON<T = Record<string, any>>(prompt: string): Promise<T> {
     const GenericJsonSchema = z.record(z.string(), z.any())
@@ -181,42 +205,17 @@ export class OllamaClient {
   }
 
   /**
-   * Standard plain text chat via local Ollama.
+   * Standard plain text chat via LangChain ChatOllama.
    */
   async chat(prompt: string): Promise<string> {
+    await this.ensureOllamaServer()
     let activeModel = this.model
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const payload = {
-          model: activeModel,
-          messages: [{ role: 'user', content: prompt }],
-          stream: false,
-          options: {
-            temperature: this.temperature,
-          },
-        }
-
-        const response = await fetch(`${this.host}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-        })
-
-        if (!response.ok) {
-          const errText = await response.text()
-          if (response.status === 404 && activeModel === this.model) {
-            const fallbackModel = await this.findAvailableLocalModel()
-            if (fallbackModel && fallbackModel !== activeModel) {
-              activeModel = fallbackModel
-              continue
-            }
-          }
-          throw new Error(`Ollama HTTP error ${response.status}: ${errText}`)
-        }
-
-        const data = await response.json()
-        return data.message?.content || ''
+        const llm = this.createChatModel(activeModel)
+        const response = await llm.invoke([new HumanMessage(prompt)])
+        return typeof response.content === 'string' ? response.content : JSON.stringify(response.content)
       } catch (err: any) {
         if (attempt === 1) throw err
         await new Promise(r => setTimeout(r, 500))
@@ -226,5 +225,3 @@ export class OllamaClient {
     return ''
   }
 }
-
-

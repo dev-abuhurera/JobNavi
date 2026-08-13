@@ -1,5 +1,4 @@
 import { Page } from 'playwright'
-import { StagehandService } from './stagehand_service'
 
 export interface ExtractedFormField {
   selector: string | null
@@ -12,7 +11,7 @@ export interface ExtractedFormField {
 }
 
 export class FormExtractor {
-  static MODAL_SELECTOR = '.jobs-easy-apply-modal, .jobs-easy-apply-content, [role="dialog"], .artdeco-modal, [data-test-modal], [aria-modal="true"], form'
+  static MODAL_SELECTOR = '.jobs-easy-apply-modal, .jobs-easy-apply-content, [role="dialog"], .artdeco-modal, .artdeco-modal__content, [data-test-modal], [aria-modal="true"], div[class*="easy-apply"], form'
 
   /**
    * Extracts all interactive form fields (inputs, textareas, selects, radio groups)
@@ -21,18 +20,47 @@ export class FormExtractor {
   static async extractFormJSON(page: Page): Promise<ExtractedFormField[]> {
     if (page.isClosed()) return []
 
-    // 1. Attempt AI-native extraction via Stagehand Service if available
-    try {
-      const stagehandFields = await StagehandService.extractFormFields(page)
-      if (stagehandFields.length > 0) {
-        return stagehandFields
-      }
-    } catch { /* fallback to Playwright DOM script */ }
-
     try {
       const script = `
-        var modalSel = arguments[0];
-        var modal = document.querySelector(modalSel) || document.querySelector('form') || document.body;
+        function findActiveModal() {
+          var modalSelectors = [
+            '.jobs-easy-apply-content',
+            '.jobs-easy-apply-modal',
+            'div[class*="easy-apply-modal"]',
+            'div[class*="jobs-easy-apply-content"]',
+            '.artdeco-modal__content',
+            '.artdeco-modal',
+            '[role="dialog"]',
+            '[aria-modal="true"]'
+          ];
+
+          for (var s = 0; s < modalSelectors.length; s++) {
+            var els = Array.from(document.querySelectorAll(modalSelectors[s]));
+            for (var i = 0; i < els.length; i++) {
+              var el = els[i];
+              var rect = el.getBoundingClientRect();
+              var st = window.getComputedStyle(el);
+              if (st.display !== 'none' && st.visibility !== 'hidden' && rect.height > 100 && rect.width > 200) {
+                if (el.querySelector('input, select, textarea, fieldset, [role="radiogroup"], button[aria-label*="Next" i], button[aria-label*="Review" i], button[aria-label*="Submit" i], button[aria-label*="Continue" i]')) {
+                  return el;
+                }
+              }
+            }
+          }
+
+          var dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"], .artdeco-modal'));
+          for (var j = 0; j < dialogs.length; j++) {
+            var d = dialogs[j];
+            var r = d.getBoundingClientRect();
+            var style = window.getComputedStyle(d);
+            if (style.display !== 'none' && style.visibility !== 'hidden' && r.height > 100 && r.width > 200) {
+              return d;
+            }
+          }
+          return null;
+        }
+
+        var modal = findActiveModal();
         if (!modal) return [];
 
         var result = [];
@@ -60,13 +88,7 @@ export class FormExtractor {
 
           for (var gIdx = 0; gIdx < groupRadios.length; gIdx++) {
             var gr = groupRadios[gIdx];
-            var parentLabel = gr.closest ? (gr.closest('label') || gr.parentElement) : gr.parentElement;
-            var isRadioChecked = gr.checked || 
-              gr.getAttribute('aria-checked') === 'true' || 
-              (parentLabel && parentLabel.getAttribute('aria-checked') === 'true') ||
-              (parentLabel && parentLabel.className && (parentLabel.className.indexOf('artdeco-pill--selected') >= 0 || parentLabel.className.indexOf('selected') >= 0));
-            
-            if (isRadioChecked) isChecked = true;
+            if (gr.checked) isChecked = true;
             if (gr.required || gr.getAttribute('aria-required') === 'true') isRequired = true;
 
             var rLabel = '';
@@ -74,8 +96,9 @@ export class FormExtractor {
               var lEl = document.querySelector('label[for="' + gr.id + '"]') || document.getElementById(gr.id);
               if (lEl) rLabel = lEl.textContent || '';
             }
-            if (!rLabel && parentLabel) {
-              rLabel = parentLabel.textContent || '';
+            if (!rLabel && gr.closest) {
+              var parentLabel = gr.closest('label') || gr.parentElement;
+              if (parentLabel) rLabel = parentLabel.textContent || '';
             }
             if (!rLabel) rLabel = gr.value || ('Option ' + (gIdx + 1));
 
@@ -156,6 +179,14 @@ export class FormExtractor {
               rawLabel = descEl.textContent || '';
             }
           }
+          if (!rawLabel && input.type === 'checkbox') {
+            if (el.nextElementSibling) rawLabel = el.nextElementSibling.textContent || '';
+            if (!rawLabel && el.parentElement) rawLabel = el.parentElement.textContent || '';
+            if (!rawLabel && el.closest) {
+              var cbContainer = el.closest('.fb-dash-form-element, .jobs-easy-apply-form-section__element, .artdeco-checkbox, label, div');
+              if (cbContainer) rawLabel = cbContainer.textContent || '';
+            }
+          }
           if (!rawLabel && el.previousElementSibling) {
             rawLabel = el.previousElementSibling.textContent || '';
           }
@@ -183,21 +214,18 @@ export class FormExtractor {
             }
           } else {
             currentValue = (input.value || '').trim();
-            // ONLY treat value as a raw URN token if it starts with urn:li: or geo: or if it's a combobox/typeahead with a raw location ID
-            var isTypeahead = idAttr.indexOf('typeahead') >= 0 || idAttr.indexOf('location') >= 0 || ariaLabel.indexOf('location') >= 0 || (input.getAttribute('role') === 'combobox');
-            var isRawUrn = currentValue.toLowerCase().indexOf('urn:li') >= 0 || currentValue.toLowerCase().indexOf('geo:') >= 0 || (isTypeahead && /^\\d+$/.test(currentValue));
+            // Exclude raw URN internal LinkedIn strings (urn:li:... or geo:...) but preserve valid text/numeric values
+            var isRawUrn = currentValue.toLowerCase().indexOf('urn:li') >= 0 || currentValue.toLowerCase().indexOf('geo:') >= 0;
             
             if (isRawUrn) {
               currentValue = '';
-            }
-            
-            if (!currentValue && el.closest) {
+            } else if (!currentValue && el.closest) {
               var parentContainer = el.closest('.fb-dash-form-element, .jobs-easy-apply-form-section__element, .artdeco-typeahead, [class*="typeahead" i], fieldset, div');
               if (parentContainer) {
                 var selectedPill = parentContainer.querySelector('.artdeco-typeahead__result, [class*="pill" i], [class*="selected" i], [class*="badge" i], button[aria-label*="Remove" i], button[aria-label*="Dismiss" i]');
                 if (selectedPill) {
-                  var pillText = (selectedPill.textContent || '').replace(/\\s+/g, ' ').trim();
-                  if (pillText.toLowerCase().indexOf('urn:li') < 0 && pillText.toLowerCase().indexOf('geo:') < 0 && !/^\\d+$/.test(pillText)) {
+                  var pillText = (selectedPill.textContent || '').replace(/\s+/g, ' ').trim();
+                  if (pillText.toLowerCase().indexOf('urn:li') < 0 && pillText.toLowerCase().indexOf('geo:') < 0) {
                     currentValue = pillText;
                   }
                 }
@@ -207,7 +235,7 @@ export class FormExtractor {
 
           var isEmpty = !currentValue || currentValue === '';
           if (input.type === 'checkbox') {
-            isEmpty = !input.checked && input.getAttribute('aria-checked') !== 'true';
+            isEmpty = !input.checked;
           }
 
           var opts = undefined;
@@ -295,9 +323,12 @@ export class FormExtractor {
 
       if (a11yNodes.length === 0) return fields
 
-      return fields.map((field, idx) => {
+      return fields.map((field) => {
         const isGenericLabel = !field.label || field.label.startsWith('Field ') || field.label.startsWith('radio-group-')
-        const matched = a11yNodes[idx] || a11yNodes.find(n => n.name && field.label && n.name.toLowerCase().includes(field.label.toLowerCase()))
+        const matched = a11yNodes.find(n => n.name && field.label && (
+          n.name.toLowerCase().includes(field.label.toLowerCase()) ||
+          field.label.toLowerCase().includes(n.name.toLowerCase())
+        ))
 
         let updatedLabel = field.label
         let updatedVal = field.currentValue
@@ -307,7 +338,7 @@ export class FormExtractor {
           if (isGenericLabel && matched.name) {
             updatedLabel = matched.name.substring(0, 150)
           }
-          if (!updatedVal && matched.value) {
+          if (!updatedVal && matched.value && matched.value.toLowerCase().indexOf('urn:li') < 0) {
             updatedVal = matched.value
             updatedIsEmpty = false
           }

@@ -1,7 +1,12 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   experimental: {
-    serverComponentsExternalPackages: ['@xenova/transformers', 'onnxruntime-node', 'pdf-parse'],
+    serverComponentsExternalPackages: [
+      '@xenova/transformers',
+      'onnxruntime-node',
+      'pdf-parse',
+      'playwright',
+    ],
   },
   webpack: (config) => {
     config.infrastructureLogging = { level: 'error' };

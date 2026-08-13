@@ -6,10 +6,10 @@ import { normalizeProfile } from '../utils/profile'
 import { validateConfig } from '../config'
 import { logger } from '../logger'
 import type { NormalizedProfile, ApplicationResult } from '../types'
-import { FormExtractor } from './form_extractor'
+import { FormExtractor, ExtractedFormField } from './form_extractor'
 import { FormDOMActions } from './form_dom_actions'
 import { FormAIFiller } from './form_ai_filler'
-import { StagehandService } from './stagehand_service'
+
 export { normalizeProfile }
 export type { NormalizedProfile }
 
@@ -32,10 +32,6 @@ export class PortalAutomationHybrid {
     }
     return dir
   }
-
-  // ─────────────────────────────────────────────────────────────────
-  // Initialization — loads saved portal session from Supabase
-  // ─────────────────────────────────────────────────────────────────
 
   async init(userId: string, portal: string, isHeadless: boolean = false) {
     const cfg = validateConfig()
@@ -194,14 +190,7 @@ export class PortalAutomationHybrid {
       `);
       await new Promise(resolve => setTimeout(resolve, 3000));
 
-      // Check session validity only for automated portals that require login
-      const automatedPortals = ['linkedin']
-      if (automatedPortals.includes(job.source)) {
-        const sessionValid = await this._checkSessionValid(page, job.source)
-        if (!sessionValid) {
-          return { status: 'session_expired', message: `Please reconnect your ${job.source} account in Settings` }
-        }
-      }
+
 
       // Route to correct portal handler with smart application_type fallback
       const appType = job.application_type || (job.source_url?.includes('linkedin.com') ? 'linkedin_easy_apply' : 'manual')
@@ -409,131 +398,37 @@ export class PortalAutomationHybrid {
       }
     }
 
-    // Step 3 — Wait for the job details pane to render, then find the Easy Apply button
-    // by scanning visible elements for "Easy Apply" text/aria-label — much more
-    // robust than relying on LinkedIn's auto-generated CSS class names.
-    try {
-      await page.waitForSelector(
-        '.jobs-unified-top-card, .job-details-jobs-unified-top-card__container, .jobs-apply-button, .jobs-s-apply',
-        { timeout: 15000 }
-      )
-    } catch {
-      console.log('[Automation] Job details pane never appeared — page may be a search/listing page')
-    }
-    // Extra buffer for the apply button to mount after the pane loads
-    await this._delay(1000, 2000)
-
-    try {
-      const url = page.url()
-      const title = await page.title()
-      const paneCheck = await page.evaluate(() => {
-        return {
-          hasUnifiedCard: !!document.querySelector('.jobs-unified-top-card'),
-          hasUnifiedContainer: !!document.querySelector('.job-details-jobs-unified-top-card__container'),
-          hasApplyClass: !!document.querySelector('[class*="jobs-apply"]'),
-          bodyTextStart: document.body.innerText.substring(0, 300).replace(/\\s+/g, ' ')
-        }
-      })
-      console.log('[DEBUG] Job pane check:', JSON.stringify({ url, title, ...paneCheck }, null, 2))
-    } catch { /* ignore */ }
-
     const easyApplyBtn = await this._findEasyApplyButton(page)
 
     if (!easyApplyBtn) {
-      // Debug dump so future failures are diagnosable from logs
-      try {
-        const buttonDump = await page.evaluate(() => {
-          return Array.from(document.querySelectorAll('button, a, div[role="button"], span[role="button"], [class*="apply" i]'))
-            .filter(b => (b as HTMLElement).offsetParent !== null)
-            .map(b => ({
-              tag: b.tagName,
-              text: (b.textContent || '').replace(/\s+/g, ' ').trim().substring(0, 60),
-              aria: b.getAttribute('aria-label'),
-              class: (b.className || '').toString().substring(0, 120),
-            }))
-            .filter(b => b.text || b.aria)
-        })
-        console.log('[DEBUG] Visible clickable elements:', JSON.stringify(buttonDump, null, 2))
-      } catch { /* ignore */ }
-
       const screenshot = await this._screenshot(page, userId, job.company)
       return { status: 'no_apply_button', screenshot, message: 'Skipped: Not a LinkedIn Easy Apply job (external Apply buttons disabled).' }
     }
 
-    // Step 5 — Click Easy Apply (with retry if modal doesn't open)
-    let activeApplyBtn: ElementHandle<Element> | null = easyApplyBtn
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await activeApplyBtn?.scrollIntoViewIfNeeded()
+    // Step 5 — Click Easy Apply and proceed to form fill
+    try {
+      await easyApplyBtn.scrollIntoViewIfNeeded().catch(() => {})
+      await easyApplyBtn.click({ timeout: 5000 }).catch(() => {})
 
-        // Right before clicking, log what we're about to click
-        const targetInfo = await page.evaluate(() => {
-          const el = document.querySelector('[data-jobnavi-target="easy-apply"]') as HTMLElement
-          if (!el) return null
-          return {
-            tag: el.tagName,
-            href: el.getAttribute('href'),
-            onclick: !!el.onclick,
-            parentTag: el.parentElement?.tagName,
-            parentClass: el.parentElement?.className?.substring(0, 100),
-          }
-        })
-        console.log('[DEBUG] Easy Apply target info:', JSON.stringify(targetInfo, null, 2))
+      await page.evaluate(() => {
+        const el = document.querySelector('[data-jobnavi-target="easy-apply"]') as HTMLElement | null
+        if (!el) return
+        el.scrollIntoView({ block: 'center' })
+        if ('focus' in el && typeof el.focus === 'function') el.focus()
+        if (typeof el.click === 'function') el.click()
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+      }).catch(() => {})
+    } catch (e: any) {
+      if (page.isClosed()) return { status: 'error', message: 'Browser page was closed unexpectedly during Easy Apply click' }
+    }
 
-        // Full event dispatch for Ember/React compatibility (plain .click() doesn't trigger LinkedIn's listeners)
-        await page.evaluate(() => {
-          const el = document.querySelector('[data-jobnavi-target="easy-apply"]') as HTMLElement
-          if (!el) return
-          el.scrollIntoView({ block: 'center' })
-          el.focus()
-          el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }))
-          el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }))
-          el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
-        })
-      } catch (e: any) {
-        if (page.isClosed()) return { status: 'error', message: 'Browser page was closed unexpectedly during Easy Apply click' }
-        throw e
-      }
-      await this._delay(1500, 2500)
-
-      // Step 6 — VERIFY modal opened (wait for visibility, don't just check at one instant)
-      const modalOpen = await this._waitForModal(page, 8000)
-
-      if (modalOpen) {
-        console.log('[Automation] ✅ Modal detected after attempt', attempt + 1)
-        break
-      }
-
-      // Debug: log DOM state when modal fails to open
-      try {
-        const domState = await page.evaluate(() => {
-          const dialogs = document.querySelectorAll('[role="dialog"], [aria-modal="true"]')
-          const modals = document.querySelectorAll('.artdeco-modal, .jobs-easy-apply-modal')
-          return {
-            dialogs: dialogs.length,
-            modals: modals.length,
-            visibleDialogs: Array.from(dialogs).filter(d => (d as HTMLElement).offsetParent !== null).length,
-            visibleModals: Array.from(modals).filter(m => (m as HTMLElement).offsetParent !== null).length,
-            url: window.location.href.substring(0, 150),
-          }
-        })
-        console.log(`[DEBUG] Modal check after attempt ${attempt + 1}:`, JSON.stringify(domState))
-      } catch { /* ignore */ }
-
-      if (attempt === 0) {
-        console.log('[Automation] Modal not detected after first click — retrying with fresh handle...')
-        await this._delay(1000, 1500)
-        // re-find the button in case the DOM re-rendered, and use the fresh handle
-        const retryBtn = await this._findEasyApplyButton(page)
-        if (retryBtn) activeApplyBtn = retryBtn
-        continue
-      } else {
-        const screenshot = await this._screenshot(page, userId, job.company)
-        return {
-          status: 'error',
-          screenshot,
-          message: 'Easy Apply button clicked but modal did not open'
-        }
+    const modalOpen = await this._waitForModal(page, 8000)
+    if (!modalOpen) {
+      // Direct retry with fresh handle if DOM animation was slow
+      const retryBtn = await this._findEasyApplyButton(page)
+      if (retryBtn) {
+        await retryBtn.click({ timeout: 5000 }).catch(() => {})
+        await this._waitForModal(page, 5000)
       }
     }
 
@@ -552,12 +447,6 @@ export class PortalAutomationHybrid {
     return await this._handleModalForm(page, profile, userId, job.company, resumePath, jobSkillsExperience)
   }
 
-  /**
-   * Finds the "Easy Apply" button using a plain JS text/aria scan across all
-   * visible clickable elements. This avoids brittleness from LinkedIn's
-   * auto-generated CSS class names and handles cases where the label text
-   * is split across nested <span> elements.
-   */
   private async _findEasyApplyButton(page: Page): Promise<ElementHandle<Element> | null> {
     if (page.isClosed()) return null
 
@@ -574,9 +463,11 @@ export class PortalAutomationHybrid {
 
         // First pass: exact-ish match on "easy apply"
         let best = candidates.find(el => {
-          if (el.offsetParent === null) return false
-          const text = (el.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase()
-          const aria = (el.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim().toLowerCase()
+          const rect = el.getBoundingClientRect()
+          const style = window.getComputedStyle(el)
+          if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0) return false
+          const text = (el.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase()
+          const aria = (el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().toLowerCase()
           return text.includes('easy apply') || aria.includes('easy apply')
         })
 
@@ -584,8 +475,10 @@ export class PortalAutomationHybrid {
         // (not external link) has an aria-label mentioning "Easy Apply"
         if (!best) {
           best = candidates.find(el => {
-            if (el.offsetParent === null) return false
-            const aria = (el.getAttribute('aria-label') || '').replace(/\\s+/g, ' ').trim().toLowerCase()
+            const rect = el.getBoundingClientRect()
+            const style = window.getComputedStyle(el)
+            if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0) return false
+            const aria = (el.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim().toLowerCase()
             return aria.startsWith('easy apply') || aria.includes('easy apply to')
           })
         }
@@ -629,12 +522,17 @@ export class PortalAutomationHybrid {
             '.artdeco-modal',
             '[role="dialog"]',
             '[aria-modal="true"]',
+            'div[class*="easy-apply"]'
           ]
 
           for (const sel of selectors) {
             const el = document.querySelector(sel) as HTMLElement | null
-            if (el && el.offsetParent !== null && el.offsetWidth > 0 && el.offsetHeight > 0) {
-              return true
+            if (el) {
+              const rect = el.getBoundingClientRect()
+              const style = window.getComputedStyle(el)
+              if (style.display !== 'none' && style.visibility !== 'hidden' && rect.height > 0 && rect.width > 0) {
+                return true
+              }
             }
           }
 
@@ -643,12 +541,14 @@ export class PortalAutomationHybrid {
           for (const h of headings) {
             const text = (h.textContent || '').trim().toLowerCase()
             if (text.startsWith('apply to') || text.startsWith('apply at')) {
-              // Confirm it's inside a modal-like overlay (has close button, form inputs, etc.)
               const parent = h.closest('[role="dialog"], [aria-modal="true"], .artdeco-modal, div[class*="modal"], div[class*="overlay"]') as HTMLElement
-              if (parent && parent.offsetWidth > 0) return true
-              // Even without a parent match, if the heading is visible and there's a form nearby
+              if (parent) {
+                const rect = parent.getBoundingClientRect()
+                if (rect.height > 0 && rect.width > 0) return true
+              }
               const hEl = h as HTMLElement
-              if (hEl.offsetParent !== null) {
+              const rect = hEl.getBoundingClientRect()
+              if (rect.height > 0 && rect.width > 0) {
                 const container = h.parentElement?.parentElement
                 if (container && container.querySelector('input, select, textarea, button')) {
                   return true
@@ -694,50 +594,64 @@ export class PortalAutomationHybrid {
   private async _handleModalForm(page: Page, profile: any, userId: string, company: string, resumePath: string, jobSkillsExperience?: Record<string, number>) {
     const maxSteps = 10
     const MODAL_SELECTOR = '[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal, [data-test-modal], [aria-modal="true"]'
-    const aiFiller = new FormAIFiller(this.groqApiKey)
+    const aiFiller = new FormAIFiller()
 
     let lastModalContent = ''
     let stuckCount = 0
     let uploadedInThisModal = false
 
     for (let step = 0; step < maxSteps; step++) {
-      await this._delay(200, 400)
+      await this._delay(600, 1000)
 
       if (page.isClosed()) {
         return { status: 'error', message: 'Browser page was closed unexpectedly' }
       }
 
-      // Step 1: Extract form JSON schema using FormExtractor module
-      let allFormFields = await FormExtractor.extractFormJSON(page)
-      if (allFormFields.length === 0) {
-        await this._delay(400, 700)
+      // Step 1: Extract form JSON schema (polling up to 3 seconds for DOM fields to mount)
+      let allFormFields: ExtractedFormField[] = []
+      for (let retries = 0; retries < 6; retries++) {
         allFormFields = await FormExtractor.extractFormJSON(page)
+        if (allFormFields.length > 0) break
+        await this._delay(500, 600)
       }
       const unfilledFields = allFormFields.filter(f => f.isEmpty)
+      const filledFields = allFormFields.filter(f => !f.isEmpty)
 
-      console.log(`[Automation] Modal step ${step + 1}: ${unfilledFields.length} unfilled fields (${allFormFields.length} total fields on step)`)
-      if (unfilledFields.length > 0) {
-        console.log(`[Automation] 🔍 Detected unfilled fields: ${unfilledFields.map(f => `"${f.label}" (${f.type})`).join(', ')}`)
+      console.log(`[Automation] 📋 Modal Step ${step + 1} Field Categorization (${allFormFields.length} total fields, ${unfilledFields.length} unfilled):`)
+      for (const f of allFormFields) {
+        if (f.isEmpty) {
+          console.log(`[Automation]   ❌ UNFILLED: "${f.label}" (${f.type})`)
+        } else {
+          console.log(`[Automation]   ✅ FILLED:   "${f.label}" = "${f.currentValue.substring(0, 35)}"`)
+        }
       }
 
-      // Step 2: Fill out form step via FormAIFiller (Heuristics + Groq JSON Answering)
-      if (allFormFields.length > 0) {
+      // Step 2: Fill out form step ONLY if there are unfilled fields
+      if (unfilledFields.length > 0) {
         await aiFiller.fillFormStep(page, allFormFields, profile, { skills_experience: jobSkillsExperience })
-        await this._delay(150, 300)
+        await this._delay(800, 1200)
+
+        // Re-extract updated field state for audit verification
+        const currentFields = await FormExtractor.extractFormJSON(page)
+        await aiFiller.auditStepFields(page, currentFields)
+      } else {
+        console.log(`[Automation] ✅ Step ${step + 1}: All ${allFormFields.length} fields on screen are already filled/satisfied. Skipping AI pass & clicking Next...`)
       }
 
       // Handle conditional master resume file upload inside application modal
       if (!page.isClosed() && resumePath && fs.existsSync(resumePath)) {
         try {
           const hasFileInput = await page.evaluate(() => {
-            const modal = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], .artdeco-modal') || document.body
+            const modal = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], .artdeco-modal, form')
+            if (!modal) return false
             return Boolean(modal.querySelector('input[type="file"], button[aria-label*="upload" i], label[for*="file" i], .jobs-document-upload__upload-button'))
           }).catch(() => false)
 
           if (hasFileInput) {
             // Check Condition 1: Is a resume currently attached or selected on screen?
             const hasAttachedResume = await page.evaluate(() => {
-              const modal = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], .artdeco-modal') || document.body
+              const modal = document.querySelector('.jobs-easy-apply-modal, [role="dialog"], .artdeco-modal, form')
+              if (!modal) return false
               
               // 1. Checked radio button or selected document item in document upload list
               const checkedRadio = modal.querySelector('input[type="radio"]:checked, [class*="document-upload"] input:checked, [class*="card--selected"], [class*="item--selected"]')
@@ -874,33 +788,46 @@ export class PortalAutomationHybrid {
         lastModalContent = currentModalContent
       }
 
-      // Dynamic submit/next button detection — evaluated directly in browser DOM
-      const clickResult = await page.evaluate(() => {
-        const modals = Array.from(document.querySelectorAll('.jobs-easy-apply-modal, [aria-modal="true"], [role="dialog"], .artdeco-modal')) as HTMLElement[]
-        const activeModal = modals.find(m => m.offsetParent !== null && m.offsetWidth > 0 && m.offsetHeight > 0) || document.querySelector('.jobs-easy-apply-modal') || document.body
+      // Dynamic submit/next button detection — evaluated directly in active modal DOM
+      let clickResult = await page.evaluate(() => {
+        const modals = Array.from(document.querySelectorAll('.jobs-easy-apply-modal, .jobs-easy-apply-content, [aria-modal="true"], [role="dialog"], .artdeco-modal')) as HTMLElement[]
+        const activeModal = modals.find(m => {
+          const st = window.getComputedStyle(m)
+          return st.display !== 'none' && st.visibility !== 'hidden'
+        }) || document.body
 
-        // Query all buttons inside active modal or footer/action-bar
-        let buttons = Array.from(activeModal.querySelectorAll('button, footer button, div[class*="action"] button')) as HTMLButtonElement[]
+        // First query footer / actionbar container inside active modal
+        const footer = activeModal.querySelector('footer, .jobs-easy-apply-modal__footer, .artdeco-modal__actionbar, [class*="actionbar" i], [class*="footer" i]') || activeModal
+        const allCandidates = Array.from(footer.querySelectorAll('button, [role="button"], a[role="button"]')) as HTMLElement[]
+        const buttons = allCandidates.filter(b => {
+          const st = window.getComputedStyle(b)
+          return st.display !== 'none' && st.visibility !== 'hidden'
+        })
 
-        if (!buttons.length) {
-          buttons = Array.from(document.querySelectorAll('footer button, .artdeco-modal__action-bar button, button.artdeco-button--primary')) as HTMLButtonElement[]
-        }
-
-        const targetBtn = buttons.find(b => {
+        // Prioritize primary action button (Next / Continue / Review / Submit)
+        let targetBtn = buttons.find(b => {
           const text = (b.textContent || '').trim().toLowerCase()
           const aria = (b.getAttribute('aria-label') || '').trim().toLowerCase()
-
-          // Exclude close/dismiss/cancel buttons
-          const isDismiss = /close|dismiss|cancel/i.test(text) || /close|dismiss|cancel/i.test(aria)
-          if (isDismiss) return false
-
-          const isAction = /next|continue|review|submit|apply/i.test(text) || /next|continue|review|submit|apply/i.test(aria) || b.classList.contains('artdeco-button--primary')
-          return isAction
+          if (/close|dismiss|cancel|back|previous/i.test(text) || /close|dismiss|cancel|back|previous/i.test(aria)) return false
+          return b.classList.contains('artdeco-button--primary') || /next|continue|review|submit|apply/i.test(text) || /next|continue|review|submit|apply/i.test(aria)
         })
+
+        if (!targetBtn) {
+          // Fallback to any visible action button in modal
+          const modalBtns = Array.from(activeModal.querySelectorAll('button, [role="button"]')) as HTMLElement[]
+          targetBtn = modalBtns.find(b => {
+            const st = window.getComputedStyle(b)
+            if (st.display === 'none' || st.visibility === 'hidden') return false
+            const text = (b.textContent || '').trim().toLowerCase()
+            const aria = (b.getAttribute('aria-label') || '').trim().toLowerCase()
+            if (/close|dismiss|cancel|back|previous/i.test(text) || /close|dismiss|cancel|back|previous/i.test(aria)) return false
+            return /next|continue|review|submit|apply/i.test(text) || /next|continue|review|submit|apply/i.test(aria)
+          })
+        }
 
         if (!targetBtn) return { clicked: false, isSubmit: false, label: '', disabledReason: 'No action button found' }
 
-        const isDisabled = targetBtn.disabled || targetBtn.getAttribute('aria-disabled') === 'true' || targetBtn.classList.contains('artdeco-button--disabled')
+        const isDisabled = (targetBtn as HTMLButtonElement).disabled || targetBtn.getAttribute('aria-disabled') === 'true' || targetBtn.classList.contains('artdeco-button--disabled')
         const text = (targetBtn.textContent || '').trim().toLowerCase()
         const aria = (targetBtn.getAttribute('aria-label') || '').trim().toLowerCase()
 
@@ -910,7 +837,8 @@ export class PortalAutomationHybrid {
 
         const isSubmit = text.includes('submit') || aria.includes('submit')
 
-        // Dispatch full event sequence for Ember/React compatibility
+        // Scroll into view & dispatch full event sequence for Ember/React compatibility
+        targetBtn.scrollIntoView({ block: 'center' })
         targetBtn.focus()
         targetBtn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
         targetBtn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }))
@@ -919,16 +847,31 @@ export class PortalAutomationHybrid {
         return { clicked: true, isSubmit, label: text || aria, disabledReason: '' }
       }).catch(e => ({ clicked: false, isSubmit: false, label: '', disabledReason: e.message }))
 
-      if (clickResult.disabledReason) {
-        console.log(`[Automation] ⚠️ Button state check: ${clickResult.disabledReason}`)
+      // Fallback to Playwright locator if DOM evaluation found no button handle
+      if (!clickResult.clicked && !clickResult.disabledReason.includes('disabled')) {
+        try {
+          const fallbackLoc = page.locator(`
+            .jobs-easy-apply-modal footer button.artdeco-button--primary,
+            [role="dialog"] footer button.artdeco-button--primary,
+            .jobs-easy-apply-modal button:has-text("Next"),
+            .jobs-easy-apply-modal button:has-text("Review"),
+            .jobs-easy-apply-modal button:has-text("Submit application"),
+            [role="dialog"] button:has-text("Next"),
+            [role="dialog"] button:has-text("Review"),
+            [role="dialog"] button:has-text("Submit application")
+          `).first()
+
+          if ((await fallbackLoc.count().catch(() => 0)) > 0 && await fallbackLoc.isVisible().catch(() => false)) {
+            const btnText = (await fallbackLoc.innerText().catch(() => 'Next')).trim().toLowerCase()
+            const isSub = btnText.includes('submit')
+            await fallbackLoc.click({ force: true }).catch(() => {})
+            clickResult = { clicked: true, isSubmit: isSub, label: btnText, disabledReason: '' }
+          }
+        } catch { /* ignore fallback error */ }
       }
 
-      if (!clickResult.clicked) {
-        const aiClicked = await StagehandService.act('Click the Next, Continue, Review, or Submit button to advance the job application step')
-        if (aiClicked) {
-          clickResult.clicked = true
-          await this._delay(2000, 3000)
-        }
+      if (clickResult.disabledReason) {
+        console.log(`[Automation] ⚠️ Button state check: ${clickResult.disabledReason}`)
       }
 
       if (clickResult.clicked) {

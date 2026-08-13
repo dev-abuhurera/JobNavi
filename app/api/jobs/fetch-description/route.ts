@@ -59,16 +59,36 @@ export async function POST(request: Request) {
 
     const urlToScrape = targetJob?.source_url || sourceUrl || ''
 
-    // If description is already complete, return it immediately
-    if (targetJob?.description && targetJob.description.length > 100 && !targetJob.description.startsWith('Live LinkedIn Easy Apply Job')) {
-      return NextResponse.json({ description: targetJob.description })
+    const isPlaceholderDesc = (desc: string) => {
+      if (!desc) return true
+      if (desc.length < 250) return true
+      const lower = desc.toLowerCase()
+      return (
+        lower.includes('discovered on linkedin') ||
+        lower.includes('easy apply position') ||
+        lower.startsWith('live linkedin easy apply job')
+      )
     }
 
-    if (!urlToScrape) {
+    const currentDescIsReal = targetJob?.description && !isPlaceholderDesc(targetJob.description)
+
+    // If description and tech_stack are both already complete real data, return immediately
+    if (
+      currentDescIsReal &&
+      Array.isArray(targetJob.tech_stack) &&
+      targetJob.tech_stack.length > 0
+    ) {
+      return NextResponse.json({
+        description: targetJob.description,
+        tech_stack: targetJob.tech_stack
+      })
+    }
+
+    let fullDescription = currentDescIsReal ? targetJob.description : ''
+
+    if (!fullDescription && !urlToScrape) {
       return NextResponse.json({ error: 'No source URL found for job' }, { status: 404 })
     }
-
-    let fullDescription = ''
 
     // Method 1: Try LinkedIn guest API if URL contains job ID
     const matchViewId = urlToScrape.match(/\/jobs\/view\/(\d+)/) || urlToScrape.match(/currentJobId=(\d+)/)
